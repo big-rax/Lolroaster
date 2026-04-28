@@ -4,6 +4,7 @@ from .commands import register_commands
 from .config import TOKEN
 from .events import register_events
 
+from .riot_store import init_db
 
 def build_client() -> tuple[discord.Client, discord.app_commands.CommandTree]:
     intents = discord.Intents.default()
@@ -19,6 +20,8 @@ def build_client() -> tuple[discord.Client, discord.app_commands.CommandTree]:
 
 
 def main() -> None:
+    init_db()
+    
     client, _ = build_client()
     client.run(TOKEN)
 

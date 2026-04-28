@@ -1,2 +1,3 @@
 .env
 *.pyc
+riot_links.db
