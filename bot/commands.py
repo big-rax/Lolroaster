@@ -10,7 +10,7 @@ def register_commands(tree: app_commands.CommandTree) -> None:
 
     @tree.command(name="freaky_command", description="does something freaky")
     async def freaky_command(interaction: discord.Interaction) -> None:
-        await interaction.response.send_message("😛😛😛")
+        await interaction.response.send_message("😛😛😛lul")
 
     #@tree.command(name"Track", description="Tracks a user")
     @tree.command(name="riot_link", description="Links a Riot account for tracking")
