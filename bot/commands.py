@@ -1,5 +1,6 @@
 import discord
 from discord import app_commands
+from discord import embeds
 from pyke import Continent, Pyke, exceptions
 from bot.riot_api import get_account_info
 from bot.riot_store import save_link
@@ -36,4 +37,10 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke) -> None:
 
         rank_str= f"{rank["tier"]} {rank["rank"]} - {rank["leaguePoints"]} LP" if rank else "Unranked"
 
-        await interaction.followup.send(f"Account found, current ranked stats are: {rank_str}")
+        embed = discord.Embed(title=f"{info['gameName']}#{info['tagLine']}", color=discord.Color.blue()) 
+        
+        embed.add_field(name="Level", value=str(info["summonerLevel"]), inline=True)
+        embed.add_field(name="Solo/Duo Rank", value=rank_str, inline=True)
+        embed.set_footer(text=f"Linked to {interaction.user.display_name}")
+
+        await interaction.followup.send(embed=embed)
