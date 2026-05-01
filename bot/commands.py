@@ -35,7 +35,7 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke) -> None:
 
         rank=info["rank"]
 
-        rank_str= f"{rank["tier"]} {rank["rank"]} - {rank["leaguePoints"]} LP" if rank else "Unranked"
+        rank_str= f"{rank['tier']} {rank['rank']} - {rank['leaguePoints']} LP" if rank else "Unranked"
 
         embed = discord.Embed(title=f"{info['gameName']}#{info['tagLine']}", color=discord.Color.blue()) 
         
