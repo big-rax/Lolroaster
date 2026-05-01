@@ -5,7 +5,7 @@ from .commands import register_commands
 from .config import TOKEN, RIOT_API_KEY
 from .events import register_events
 
-from .riot_store import init_db
+from .store import init_db
 
 def build_client() -> tuple[discord.Client, discord.app_commands.CommandTree]:
     intents = discord.Intents.default()

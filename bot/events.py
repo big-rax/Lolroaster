@@ -5,6 +5,7 @@ import discord
 from .config import WORDLE_BOT_ID
 from .triggers import handle_trigger_message
 from .wordle import handle_wordle_message
+from .store import is_channel_allowed
 
 
 EDIT_RESPONSES = [
@@ -35,7 +36,9 @@ def register_events(client: discord.Client, tree: discord.app_commands.CommandTr
             handled = await handle_wordle_message(message)
             if handled:
                 return
-
+        
+        if not is_channel_allowed(message.channel.id):
+            return
         await handle_trigger_message(message)
 
     @client.event
