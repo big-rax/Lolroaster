@@ -1,6 +1,6 @@
 import random
 import re
-
+from .store import is_channel_allowed
 import discord
 
 from .data import WORDLE_RESPONSES, fresh_wordle_scores
@@ -34,6 +34,9 @@ def parse_wordle_summary(raw_content: str) -> dict[str, list[str]]:
 
 
 async def handle_wordle_message(message: discord.Message) -> bool:
+    if not is_channel_allowed(message.channel.id):
+        return
+    
     raw_content = message.content
     content = raw_content.lower()
 
@@ -41,7 +44,14 @@ async def handle_wordle_message(message: discord.Message) -> bool:
         name_part = raw_content.split(" is playing")[0]
         await message.reply(f"{name_part} is getting they wordle on 🤓")
         return True
-
+    
+    if "were playing" in content:
+        users_part = raw_content.split(" others were playing")[0]
+        other_players = users_part[-1]
+        single_name = users_part.split(" ")[0]                              #the [] operator just access the first element since split returns a list
+        await message.reply(f"{single_name} is racing against {other_players} other players!")
+        return True
+    
     if "your group" in content:
         wordle_scores = parse_wordle_summary(raw_content)
 
