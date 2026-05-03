@@ -32,6 +32,9 @@ def register_events(client: discord.Client, tree: discord.app_commands.CommandTr
         if message.author.bot and message.author.id != WORDLE_BOT_ID:
             return
 
+        if isinstance(message.channel, discord.Thread):
+            return
+
         if message.author.id == WORDLE_BOT_ID:
             handled = await handle_wordle_message(message)
             if handled:
@@ -44,6 +47,9 @@ def register_events(client: discord.Client, tree: discord.app_commands.CommandTr
     @client.event
     async def on_message_edit(before: discord.Message, after: discord.Message) -> None:
         if after.author.id == WORDLE_BOT_ID:
+            return
+
+        if isinstance(after.channel, discord.Thread):
             return
 
         if after.author.bot:
