@@ -1,6 +1,6 @@
 import random
 import re
-from .store import is_channel_allowed
+from .store import is_channel_allowed, is_user_opted_in
 import discord
 
 from .data import WORDLE_RESPONSES, fresh_wordle_scores
@@ -57,6 +57,12 @@ async def handle_wordle_message(message: discord.Message) -> bool:
 
         for score, user_ids in wordle_scores.items():
             if not user_ids:
+                continue
+
+            # filter to only opted-in users
+            opted_in_ids = [uid for uid in user_ids if is_user_opted_in(uid)]
+
+            if not opted_in_ids:
                 continue
 
             mentions = [f"<@{user_id}>" for user_id in user_ids]

@@ -20,6 +20,11 @@ def init_db() -> None:
                      guild_id TEXT NOT NULL
                     )
                 """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS opted_in_users (
+                discord_id TEXT PRIMARY KEY
+            )
+        """)
 
 def add_allowed_channel(channel_id: str, guild_id: str) -> None:
     with sqlite3.connect(DB_PATH) as conn:
@@ -27,6 +32,7 @@ def add_allowed_channel(channel_id: str, guild_id: str) -> None:
                 INSERT OR IGNORE INTO allowed_channels (channel_id, guild_id)
                 VALUES (?, ?)
                 """, (channel_id, guild_id))
+        print(f"Added channel {channel_id} to allowed channels",)
         
 def remove_allowed_channel(channel_id: str) -> None:
     with sqlite3.connect(DB_PATH) as conn:
@@ -34,6 +40,7 @@ def remove_allowed_channel(channel_id: str) -> None:
 
 def is_channel_allowed(channel_id: str) -> bool:
     with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute("SELECT channel_id FROM allowed_channels").fetchall()
         row = conn.execute(
             "SELECT 1 FROM allowed_channels WHERE channel_id = ?", (channel_id,)
         ).fetchone()
@@ -66,3 +73,22 @@ def get_link(discord_id: str) -> dict | None:
     if row:
         return {"puuid": row[0], "game_name": row[1], "tag_line": row[2]}
     return None
+
+def toggle_user_opt_in(discord_id: str) -> bool:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM opted_in_users WHERE discord_id = ?", (discord_id,)
+        ).fetchone()
+        if row is not None:
+            conn.execute("DELETE FROM opted_in_users WHERE discord_id = ?", (discord_id,))
+            return False  # opted out
+        else:
+            conn.execute("INSERT INTO opted_in_users (discord_id) VALUES (?)", (discord_id,))
+            return True  # opted in
+        
+def is_user_opted_in(discord_id: str) -> bool:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM opted_in_users WHERE discord_id = ?", (discord_id,)
+        ).fetchone()
+    return row is not None

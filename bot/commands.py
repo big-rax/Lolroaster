@@ -1,12 +1,11 @@
 import discord
 from discord import app_commands
-from discord import embeds
-from pyke import Continent, Pyke, exceptions
-from bot.riot_api import get_account_info
-from bot.store import save_link, add_allowed_channel, remove_allowed_channel, get_allowed_channels
+from pyke import Continent, Pyke, exceptions, DataDragon
+from bot.riot_api import get_account_info, get_champion_mastery
+from bot.store import save_link, add_allowed_channel, remove_allowed_channel, get_allowed_channels, get_link, toggle_user_opt_in
 
 
-def register_commands(tree: app_commands.CommandTree, api: Pyke) -> None:
+def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDragon) -> None:
     @tree.command(name="ping", description="Replies with pong")
     async def ping(interaction: discord.Interaction) -> None:
         await interaction.response.send_message("pong (in python)")
@@ -23,7 +22,7 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke) -> None:
         info = await get_account_info(api, game_name, tag_line)
 
         if info is None:
-            await interaction.followup.send(f"Couldn't find Riot account for {game_name}#{tag_line}. or some other shit broke idk")
+            await interaction.followup.send(f"Couldn't find Riot account for {game_name}#{tag_line}. or some other shit broke idk just ping Baboondini")
             return
 
         save_link(
@@ -45,6 +44,31 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke) -> None:
 
         await interaction.followup.send(embed=embed)
 
+    @tree.command(name="league_mastery", description="Displays your top champion masteries")
+    async def league_mastery(interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+
+        linked = get_link(str(interaction.user.id))
+        if linked is None:
+            await interaction.followup.send("You haven't linked a Riot account yet! Use /riot_link first.")
+            return
+
+        masteries = await get_champion_mastery(api, ddragon, linked["puuid"])
+        if masteries is None:
+            await interaction.followup.send("Something went wrong fetching your mastery data.")
+            return
+
+        embed = discord.Embed(title="Top Champion Masteries", color=discord.Color.gold())
+        for i, champ in enumerate(masteries):
+            embed.add_field(
+                name=f"#{i+1} {champ['championName']}",
+                value=f"Points: {champ['championPoints']:,} | Level: {champ['championLevel']}",
+                inline=False
+            )
+        embed.set_footer(text=f"{linked['game_name']}#{linked['tag_line']}")
+
+        await interaction.followup.send(embed=embed)
+
     @tree.command(name="set_channel", description="Sets the channel in which the bot is allowed to message, react, etc.")
     async def set_channel(interaction: discord.Interaction) -> None:
         add_allowed_channel(str(interaction.channel_id), str(interaction.guild_id))
@@ -62,3 +86,16 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke) -> None:
             return interaction.response.send_message("There are no channels currently set, please use /set_channel to add a channel!")
         channel_mentions = "\n".join([f"<#{cid}>" for cid in channels])
         await interaction.response.send_message(f"Allowed channels:{channel_mentions}")
+
+    
+    roast = app_commands.Group(name="roast", description="Roast related commands")
+
+    @roast.command(name="toggle", description="Toggle whether the bot interacts with you")
+    async def roast_toggle(interaction: discord.Interaction) -> None:
+        opted_in = toggle_user_opt_in(str(interaction.user.id))
+        if opted_in:
+            await interaction.response.send_message("You will now be roasted (when the occasion calls for it)", ephemeral=True)
+        else:
+            await interaction.response.send_message("You will no longer be roasted... at least by me.", ephemeral=True)
+
+    tree.add_command(roast)

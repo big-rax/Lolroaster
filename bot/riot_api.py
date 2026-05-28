@@ -1,4 +1,5 @@
-from pyke import Continent, Region, Pyke
+from pyke import Continent, Region, Pyke, DataDragon
+import aiohttp
 
 async def get_account_info(api: Pyke, game_name:str, tag_line:str) -> dict | None:
     try:
@@ -21,4 +22,50 @@ async def get_account_info(api: Pyke, game_name:str, tag_line:str) -> dict | Non
         }
     except Exception as e:
         print(f"Riot API ERROR: {e}")
+        return None
+    
+async def get_champion_mastery(api: Pyke, ddragon: DataDragon, puuid: str) -> list | None:
+    try:
+        masteries = await api.champion_mastery.masteries_by_puuid(Region.NA, puuid)
+        champions = await ddragon.champion.get_all("en_US")
+
+        result = []
+        for mastery in masteries[:3]:
+            champ_name = str(mastery["championId"])  # fallback
+            for name, data in champions["data"].items():
+                if int(data["key"]) == mastery["championId"]:
+                    champ_name = name
+                    break
+            result.append({
+                "championName": champ_name,
+                "championLevel": mastery["championLevel"],
+                "championPoints": mastery["championPoints"],
+            })
+
+        return result
+    except Exception as e:
+        print(f"Riot API ERROR: {e}", flush=True)
+        return None
+    
+
+async def get_champion_name_map() -> dict | None:
+    try:
+        async with aiohttp.ClientSession() as session:
+            # first get the latest version
+            async with session.get("https://ddragon.leagueoflegends.com/api/versions.json") as resp:
+                versions = await resp.json()
+                latest = versions[0]
+
+            # then fetch champion data for that version
+            async with session.get(f"https://ddragon.leagueoflegends.com/cdn/{latest}/data/en_US/champion.json") as resp:
+                data = await resp.json()
+
+        # build a dict mapping champion ID (int) to champion name (str)
+        champion_map = {}
+        for champ_name, champ_data in data["data"].items():
+            champion_map[int(champ_data["key"])] = champ_name
+
+        return champion_map
+    except Exception as e:
+        print(f"Data Dragon ERROR: {e}", flush=True)
         return None
