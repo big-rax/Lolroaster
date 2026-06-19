@@ -92,3 +92,13 @@ def is_user_opted_in(discord_id: str) -> bool:
             "SELECT 1 FROM opted_in_users WHERE discord_id = ?", (discord_id,)
         ).fetchone()
     return row is not None
+
+def get_all_links() -> list[dict]:
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT discord_id, puuid, game_name, tag_line FROM riot_links"
+        ).fetchall()
+    return [
+        {"discord_id": r[0], "puuid": r[1], "game_name": r[2], "tag_line": r[3]}
+        for r in rows
+    ]

@@ -69,3 +69,26 @@ async def get_champion_name_map() -> dict | None:
     except Exception as e:
         print(f"Data Dragon ERROR: {e}", flush=True)
         return None
+
+TIER_ORDER = [
+    "IRON", "BRONZE", "SILVER", "GOLD", "PLATINUM",
+    "EMERALD", "DIAMOND", "MASTER", "GRANDMASTER", "CHALLENGER"
+]
+DIVISION_ORDER = {"IV": 0, "III": 1, "II": 2, "I": 3}
+
+def rank_sort_key(entry: dict) -> tuple:
+    if not entry or "tier" not in entry:
+        return (-1, -1, -1)
+    tier_index = TIER_ORDER.index(entry["tier"])
+    division_index = DIVISION_ORDER.get(entry.get("rank", ""), 0)
+    return (tier_index, division_index, entry["leaguePoints"])
+
+async def get_all_ranks(api: Pyke, puuid: str) -> dict:
+    try:
+        entries = await api.league.by_puuid(Region.NA, puuid)
+        solo = next((e for e in entries if e["queueType"] == "RANKED_SOLO_5x5"), None)
+        flex = next((e for e in entries if e["queueType"] == "RANKED_FLEX_SR"), None)
+        return {"solo": solo, "flex": flex}
+    except Exception as e:
+        print(f"Riot API ERROR: {e}", flush=True)
+        return {"solo": None, "flex": None}

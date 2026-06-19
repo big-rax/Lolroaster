@@ -1,8 +1,8 @@
 import discord
 from discord import app_commands
 from pyke import Continent, Pyke, exceptions, DataDragon
-from bot.riot_api import get_account_info, get_champion_mastery
-from bot.store import save_link, add_allowed_channel, remove_allowed_channel, get_allowed_channels, get_link, toggle_user_opt_in
+from bot.riot_api import get_account_info, get_champion_mastery, get_all_ranks, rank_sort_key
+from bot.store import save_link, add_allowed_channel, remove_allowed_channel, get_allowed_channels, get_link, toggle_user_opt_in, get_all_links
 
 
 def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDragon) -> None:
@@ -97,5 +97,70 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
             await interaction.response.send_message("You will now be roasted (when the occasion calls for it)", ephemeral=True)
         else:
             await interaction.response.send_message("You will no longer be roasted... at least by me.", ephemeral=True)
+
+    @roast.command(name="leaderboard", description="Shows the server's ranked leaderboard")
+    async def leaderboard(interaction: discord.Interaction) -> None:
+        try:
+            await interaction.response.defer()
+
+            links = get_all_links()
+            if not links:
+                await interaction.followup.send("No one has linked their account yet! Use /riot_link first.")
+                return
+
+            solo_entries = []
+            flex_entries = []
+
+            for link in links:
+                if interaction.guild.get_member(int(link["discord_id"])) is None:
+                    try:
+                        await interaction.guild.fetch_member(int(link["discord_id"]))
+                    except discord.NotFound:
+                        continue
+
+                ranks = await get_all_ranks(api, link["puuid"])
+                name = f"{link['game_name']}#{link['tag_line']}"
+
+                
+                solo_entries.append({**ranks["solo"], "name": name} if ranks["solo"] else {"name": name})
+                flex_entries.append({**ranks["flex"], "name": name} if ranks["flex"] else {"name": name})
+
+            solo_entries.sort(key=rank_sort_key, reverse=True)
+            flex_entries.sort(key=rank_sort_key, reverse=True)
+
+            def format_entry(i: int, e: dict) -> str:
+                medal = ["🥇", "🥈", "🥉"][i] if i < 3 else f"`{i+1}.`"
+                if "tier" not in e:
+                    return f"{medal} **{e['name']}** — Unranked"
+                return f"{medal} **{e['name']}** — {e['tier'].capitalize()} {e['rank']} {e['leaguePoints']} LP"
+
+            embed = discord.Embed(title="🏆 Server Leaderboard", color=discord.Color.gold())
+
+            if solo_entries:
+                embed.add_field(
+                    name="Solo/Duo Queue",
+                    value="\n".join(format_entry(i, e) for i, e in enumerate(solo_entries)),
+                    inline=False
+                )
+            else:
+                embed.add_field(name="Solo/Duo Queue", value="No ranked players yet.", inline=False)
+
+            if flex_entries:
+                embed.add_field(
+                    name="Flex Queue",
+                    value="\n".join(format_entry(i, e) for i, e in enumerate(flex_entries)),
+                    inline=False
+                )
+            else:
+                embed.add_field(name="Flex Queue", value="No ranked players yet.", inline=False)
+
+            embed.set_footer(text=f"Requested by {interaction.user.display_name}")
+
+            await interaction.followup.send(embed=embed)
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            interaction.followup.send(content=e)
 
     tree.add_command(roast)
