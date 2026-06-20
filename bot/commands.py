@@ -2,7 +2,7 @@ import discord
 from discord import app_commands
 from pyke import Continent, Pyke, exceptions, DataDragon
 from bot.riot_api import get_account_info, get_champion_mastery, get_all_ranks, rank_sort_key
-from bot.store import save_link, add_allowed_channel, remove_allowed_channel, get_allowed_channels, get_link, toggle_user_opt_in, get_all_links
+from bot.store import save_link, add_allowed_channel, remove_allowed_channel, get_allowed_channels, get_link, toggle_user_opt_in, get_all_links, is_user_opted_in
 
 
 def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDragon) -> None:
@@ -98,6 +98,17 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
         else:
             await interaction.response.send_message("You will no longer be roasted... at least by me.", ephemeral=True)
 
+    @roast.command(name="toggle_user", description="(Admin) Toggle opt-in status for a specific user ID")
+    async def toggle_user(interaction: discord.Interaction, discord_id: str) -> None:
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
+            return
+        opted_in = toggle_user_opt_in(discord_id)
+        if opted_in:
+            await interaction.response.send_message(f"<@{discord_id}> will now be opted in to all Lolroaster interactions.", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"<@{discord_id}> has been opted out.", ephemeral=True)
+
     @roast.command(name="leaderboard", description="Shows the server's ranked leaderboard")
     async def leaderboard(interaction: discord.Interaction) -> None:
         try:
@@ -112,47 +123,72 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
             flex_entries = []
 
             for link in links:
-                if interaction.guild.get_member(int(link["discord_id"])) is None:
+                if not is_user_opted_in(link["discord_id"]):
+                    continue
+
+                member = interaction.guild.get_member(int(link["discord_id"]))
+                if member is None:
                     try:
-                        await interaction.guild.fetch_member(int(link["discord_id"]))
+                        member = await interaction.guild.fetch_member(int(link["discord_id"]))
                     except discord.NotFound:
                         continue
 
                 ranks = await get_all_ranks(api, link["puuid"])
-                name = f"{link['game_name']}#{link['tag_line']}"
+                riot_name = f"{link['game_name']}#{link['tag_line']}"
+                extra = {"name": riot_name, "display_name": member.display_name}
 
-                
-                solo_entries.append({**ranks["solo"], "name": name} if ranks["solo"] else {"name": name})
-                flex_entries.append({**ranks["flex"], "name": name} if ranks["flex"] else {"name": name})
+                solo_entries.append({**ranks["solo"], **extra} if ranks["solo"] else extra)
+                flex_entries.append({**ranks["flex"], **extra} if ranks["flex"] else extra)
 
             solo_entries.sort(key=rank_sort_key, reverse=True)
             flex_entries.sort(key=rank_sort_key, reverse=True)
 
+            TIER_EMOJI = {
+                "iron": "🤖", "bronze": "💀", "silver": "👶", "gold": "🤓",
+                "platinum": "🗿", "emerald": "💚", "diamond": "💎",
+                "master": "🔮", "grandmaster": "🔥", "challenger": "👑",
+            }
+            TIER_COLOR = {
+                "iron": 0x8A7066, "bronze": 0xA05000, "silver": 0xA8B4C0,
+                "gold": 0xC89B3C, "platinum": 0x007B6C, "emerald": 0x009B57,
+                "diamond": 0x576BCE, "master": 0x9B4BC8, "grandmaster": 0xC8342B,
+                "challenger": 0xF4C874,
+            }
+
+            top_tier = next((e["tier"].lower() for e in solo_entries if "tier" in e), None)
+            embed_color = discord.Color(TIER_COLOR[top_tier]) if top_tier else discord.Color.fuchsia()
+
             def format_entry(i: int, e: dict) -> str:
                 medal = ["🥇", "🥈", "🥉"][i] if i < 3 else f"`{i+1}.`"
-                if "tier" not in e:
-                    return f"{medal} **{e['name']}** — Unranked"
-                return f"{medal} **{e['name']}** — {e['tier'].capitalize()} {e['rank']} {e['leaguePoints']} LP"
+                label = f"**{e['display_name']}** ({e['name']})"
+                tier_emoji = TIER_EMOJI.get(e["tier"].lower(), "")
+                return f"{medal} {tier_emoji} {label} — {e['tier'].capitalize()} {e['rank']} {e['leaguePoints']:,} LP"
 
-            embed = discord.Embed(title="🏆 Server Leaderboard", color=discord.Color.gold())
+            def build_field(entries: list) -> str:
+                ranked = [e for e in entries if "tier" in e]
+                unranked = [e for e in entries if "tier" not in e]
+                lines = [format_entry(i, e) for i, e in enumerate(ranked)]
+                if ranked and unranked:
+                    lines.append("───────────────\n**Grass Touchers**")
+                for e in unranked:
+                    lines.append(f"-# {e['display_name']} ({e['name']}) — Unranked")
+                return "\n".join(lines) if lines else None
 
-            if solo_entries:
-                embed.add_field(
-                    name="Solo/Duo Queue",
-                    value="\n".join(format_entry(i, e) for i, e in enumerate(solo_entries)),
-                    inline=False
-                )
-            else:
-                embed.add_field(name="Solo/Duo Queue", value="No ranked players yet.", inline=False)
+            embed = discord.Embed(title="🏆 Server Leaderboard", color=embed_color)
 
-            if flex_entries:
-                embed.add_field(
-                    name="Flex Queue",
-                    value="\n".join(format_entry(i, e) for i, e in enumerate(flex_entries)),
-                    inline=False
-                )
-            else:
-                embed.add_field(name="Flex Queue", value="No ranked players yet.", inline=False)
+            embed.add_field(
+                name="Solo/Duo Queue",
+                value=build_field(solo_entries) or "No players yet.",
+                inline=False
+            )
+
+            embed.add_field(name="​", value="​", inline=False)
+
+            embed.add_field(
+                name="Flex Queue",
+                value=build_field(flex_entries) or "No players yet.",
+                inline=False
+            )
 
             embed.set_footer(text=f"Requested by {interaction.user.display_name}")
 
