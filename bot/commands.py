@@ -5,6 +5,8 @@ from bot.riot_api import get_account_info, get_champion_mastery, get_all_ranks, 
 from bot.store import save_link, add_allowed_channel, remove_allowed_channel, get_allowed_channels, get_link, toggle_user_opt_in, get_all_links, is_user_opted_in
 
 
+# Registers all slash commands with the Discord command tree.
+# Takes the command tree, Riot API client, and DataDragon client as arguments.
 def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDragon) -> None:
     @tree.command(name="ping", description="Replies with pong")
     async def ping(interaction: discord.Interaction) -> None:
@@ -15,6 +17,8 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
         await interaction.response.send_message("😛😛😛lul")
 
     #@tree.command(name"Track", description="Tracks a user")
+    # Looks up a Riot account by game name and tag line, saves the link to the calling user's
+    # Discord ID, and replies with an embed showing their level and Solo/Duo rank.
     @tree.command(name="riot_link", description="Links your Riot account")
     async def riot_link(interaction: discord.Interaction, game_name: str, tag_line: str) -> None:
         await interaction.response.defer()
@@ -36,14 +40,16 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
 
         rank_str= f"{rank['tier']} {rank['rank']} - {rank['leaguePoints']} LP" if rank else "Unranked"
 
-        embed = discord.Embed(title=f"{info['gameName']}#{info['tagLine']}", color=discord.Color.blue()) 
-        
+        embed = discord.Embed(title=f"{info['gameName']}#{info['tagLine']}", color=discord.Color.blue())
+
         embed.add_field(name="Level", value=str(info["summonerLevel"]), inline=True)
         embed.add_field(name="Solo/Duo Rank", value=rank_str, inline=True)
         embed.set_footer(text=f"Linked to {interaction.user.display_name}")
 
         await interaction.followup.send(embed=embed)
 
+    # Fetches the top champion masteries for the calling user's linked Riot account
+    # and displays them in an embed ordered by mastery points.
     @tree.command(name="league_mastery", description="Displays your top champion masteries")
     async def league_mastery(interaction: discord.Interaction) -> None:
         await interaction.response.defer()
@@ -69,16 +75,19 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
 
         await interaction.followup.send(embed=embed)
 
+    # Adds the current channel to the bot's allowed list so it can send messages and reactions there.
     @tree.command(name="set_channel", description="Sets the channel in which the bot is allowed to message, react, etc.")
     async def set_channel(interaction: discord.Interaction) -> None:
         add_allowed_channel(str(interaction.channel_id), str(interaction.guild_id))
         await interaction.response.send_message(f"✅ Lolroaster will now react (roast) users in <#{interaction.channel_id}>")
 
+    # Removes the current channel from the bot's allowed list.
     @tree.command(name="remove_allowed_channel", description="Removes an allowed channel")
     async def removed_allowed_channel(interaction: discord.Interaction) -> None:
         remove_allowed_channel(str(interaction.channel_id))
         await interaction.response.send_message(f"😶‍🌫️ Lolroaster will no longer yap in <#{interaction.channel_id}>")
 
+    # Lists all channels in the server that the bot is currently allowed to operate in.
     @tree.command(name="list_channels",description="List all allowed channels in a server")
     async def list_channels(interaction: discord.Interaction) -> None:
         channels = get_allowed_channels(str(interaction.guild_id))
@@ -87,9 +96,11 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
         channel_mentions = "\n".join([f"<#{cid}>" for cid in channels])
         await interaction.response.send_message(f"Allowed channels:{channel_mentions}")
 
-    
+
     roast = app_commands.Group(name="roast", description="Roast related commands")
 
+    # Toggles the calling user's opt-in status for bot interactions (roasts, leaderboard, etc.).
+    # Responds ephemerally so only the user sees the confirmation.
     @roast.command(name="toggle", description="Toggle whether the bot interacts with you")
     async def roast_toggle(interaction: discord.Interaction) -> None:
         opted_in = toggle_user_opt_in(str(interaction.user.id))
@@ -98,17 +109,23 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
         else:
             await interaction.response.send_message("You will no longer be roasted... at least by me.", ephemeral=True)
 
-    @roast.command(name="toggle_user", description="(Admin) Toggle opt-in status for a specific user ID")
-    async def toggle_user(interaction: discord.Interaction, discord_id: str) -> None:
+    # Admin-only: toggles opt-in status for any server member selected via a user picker.
+    # Blocked for non-admins. Responds ephemerally so only the admin sees the confirmation.
+    @roast.command(name="toggle_user", description="(Admin) Toggle opt-in status for a specific user")
+    async def toggle_user(interaction: discord.Interaction, user: discord.Member) -> None:
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
             return
-        opted_in = toggle_user_opt_in(discord_id)
+        opted_in = toggle_user_opt_in(str(user.id))
         if opted_in:
-            await interaction.response.send_message(f"<@{discord_id}> will now be opted in to all Lolroaster interactions.", ephemeral=True)
+            await interaction.response.send_message(f"<@{user.id}> will now be opted in to all Lolroaster interactions.", ephemeral=True)
         else:
-            await interaction.response.send_message(f"<@{discord_id}> has been opted out.", ephemeral=True)
+            await interaction.response.send_message(f"<@{user.id}> has been opted out.", ephemeral=True)
 
+    # Builds and sends a leaderboard embed for all opted-in users who have linked Riot accounts.
+    # Fetches Solo/Duo and Flex ranks for each user, sorts by rank, and displays them with
+    # tier/division emojis and LP. Ranked players are shown above a separator from unranked ones.
+    # Embed color reflects the highest-ranked Solo/Duo player's tier.
     @roast.command(name="leaderboard", description="Shows the server's ranked leaderboard")
     async def leaderboard(interaction: discord.Interaction) -> None:
         try:
@@ -144,10 +161,19 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
             flex_entries.sort(key=rank_sort_key, reverse=True)
 
             TIER_EMOJI = {
-                "iron": "🤖", "bronze": "💀", "silver": "👶", "gold": "🤓",
-                "platinum": "🗿", "emerald": "💚", "diamond": "💎",
-                "master": "🔮", "grandmaster": "🔥", "challenger": "👑",
+                "iron": "<:7574iron:1517989092288233513>",
+                "bronze": "<:1184bronze:1517989087674368171>",
+                "silver": "<:7455silver:1517989093135355954>",
+                "gold": "<:1053gold:1517989094473470013>",
+                "platinum": "<:3978platinum:1517989095794806804>",
+                "emerald": "💚",
+                "diamond": "<:1053diamond:1517989089847017674>",
+                "master": "<:9231master:1517989091436658919>",
+                "grandmaster": "<:9476grandmaster:1517989098285961216>",
+                "challenger": "<:9476challenger:1517989097094910092>",
             }
+            DIVISION_EMOJI = {"I": "👑", "II": "🫃", "III": "🤪", "IV": "💀"}
+            TIERED = {"iron", "bronze", "silver", "gold", "platinum", "emerald", "diamond"}
             TIER_COLOR = {
                 "iron": 0x8A7066, "bronze": 0xA05000, "silver": 0xA8B4C0,
                 "gold": 0xC89B3C, "platinum": 0x007B6C, "emerald": 0x009B57,
@@ -161,8 +187,10 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
             def format_entry(i: int, e: dict) -> str:
                 medal = ["🥇", "🥈", "🥉"][i] if i < 3 else f"`{i+1}.`"
                 label = f"**{e['display_name']}** ({e['name']})"
-                tier_emoji = TIER_EMOJI.get(e["tier"].lower(), "")
-                return f"{medal} {tier_emoji} {label} — {e['tier'].capitalize()} {e['rank']} {e['leaguePoints']:,} LP"
+                tier_lower = e["tier"].lower()
+                tier_emoji = TIER_EMOJI.get(tier_lower, "")
+                div_emoji = DIVISION_EMOJI.get(e["rank"], "") if tier_lower in TIERED else ""
+                return f"{medal} {tier_emoji} {label} — {e['tier'].capitalize()} {e['rank']} {div_emoji} {e['leaguePoints']:,} LP"
 
             def build_field(entries: list) -> str:
                 ranked = [e for e in entries if "tier" in e]
@@ -197,6 +225,6 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
         except Exception as e:
             import traceback
             traceback.print_exc()
-            interaction.followup.send(content=e)
+            await interaction.followup.send(content=str(e))
 
     tree.add_command(roast)
