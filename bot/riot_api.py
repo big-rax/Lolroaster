@@ -83,6 +83,14 @@ def rank_sort_key(entry: dict) -> tuple:
     division_index = DIVISION_ORDER.get(entry.get("rank", ""), 0)
     return (tier_index, division_index, entry["leaguePoints"])
 
+# Fetches the current live game for a player by PUUID.
+# Returns the full game data dict if in a game, or None if not in one.
+async def get_live_game(api: Pyke, puuid: str) -> dict | None:
+    try:
+        return await api.spectator.by_puuid(Region.NA, puuid)
+    except Exception:
+        return None
+
 async def get_all_ranks(api: Pyke, puuid: str) -> dict:
     try:
         entries = await api.league.by_puuid(Region.NA, puuid)

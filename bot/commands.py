@@ -1,7 +1,7 @@
 import discord
 from discord import app_commands
 from pyke import Continent, Pyke, exceptions, DataDragon
-from bot.riot_api import get_account_info, get_champion_mastery, get_all_ranks, rank_sort_key
+from bot.riot_api import get_account_info, get_champion_mastery, get_all_ranks, rank_sort_key, get_live_game, get_champion_name_map
 from bot.store import save_link, add_allowed_channel, remove_allowed_channel, get_allowed_channels, get_link, toggle_user_opt_in, get_all_links, is_user_opted_in
 
 
@@ -121,6 +121,58 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
             await interaction.response.send_message(f"<@{user.id}> will now be opted in to all Lolroaster interactions.", ephemeral=True)
         else:
             await interaction.response.send_message(f"<@{user.id}> has been opted out.", ephemeral=True)
+
+    # Checks if a linked user is currently in a live game. Defaults to the caller if no user is
+    # specified. Shows game mode, time elapsed, and both teams with champion names and Riot IDs.
+    @roast.command(name="live", description="Check if you (or another linked user) are in a live game")
+    async def live(interaction: discord.Interaction, user: discord.Member | None = None) -> None:
+        await interaction.response.defer()
+
+        target = user or interaction.user
+        linked = get_link(str(target.id))
+        if linked is None:
+            noun = "You haven't" if user is None else f"{target.display_name} hasn't"
+            await interaction.followup.send(f"{noun} linked a Riot account yet.")
+            return
+
+        game = await get_live_game(api, linked["puuid"])
+        if game is None:
+            noun = "You're" if user is None else f"{target.display_name} is"
+            await interaction.followup.send(f"{noun} not currently in a game.")
+            return
+
+        QUEUE_NAMES = {
+            420: "Ranked Solo/Duo", 440: "Ranked Flex", 450: "ARAM",
+            400: "Normal Draft", 430: "Normal Blind", 0: "Custom",
+        }
+        queue_name = QUEUE_NAMES.get(game.get("gameQueueConfigId", 0), game.get("gameMode", "Unknown"))
+
+        elapsed = game.get("gameLength", 0)
+        time_str = f"{elapsed // 60}m {elapsed % 60}s" if elapsed > 0 else "In loading screen"
+
+        champ_map = await get_champion_name_map()
+
+        blue = [p for p in game["participants"] if p["teamId"] == 100]
+        red = [p for p in game["participants"] if p["teamId"] == 200]
+
+        def fmt_team(players: list) -> str:
+            lines = []
+            for p in players:
+                champ = champ_map.get(p["championId"], str(p["championId"])) if champ_map else str(p["championId"])
+                name = p.get("riotId", p.get("summonerName", "Unknown"))
+                lines.append(f"**{champ}** — {name}")
+            return "\n".join(lines)
+
+        embed = discord.Embed(
+            title=f"🔴 Live Game — {queue_name}",
+            description=f"⏱️ {time_str}",
+            color=discord.Color.red()
+        )
+        embed.add_field(name="🔵 Blue Team", value=fmt_team(blue), inline=True)
+        embed.add_field(name="🔴 Red Team", value=fmt_team(red), inline=True)
+        embed.set_footer(text=f"{linked['game_name']}#{linked['tag_line']}")
+
+        await interaction.followup.send(embed=embed)
 
     # Builds and sends a leaderboard embed for all opted-in users who have linked Riot accounts.
     # Fetches Solo/Duo and Flex ranks for each user, sorts by rank, and displays them with
