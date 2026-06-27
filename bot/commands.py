@@ -1,3 +1,4 @@
+import time
 import discord
 from discord import app_commands
 from pyke import Continent, Pyke, exceptions, DataDragon
@@ -122,8 +123,102 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
         else:
             await interaction.response.send_message(f"<@{user.id}> has been opted out.", ephemeral=True)
 
+    QUEUE_NAMES = {
+        420: "Ranked Solo/Duo", 440: "Ranked Flex", 450: "ARAM",
+        400: "Normal Draft", 430: "Normal Blind", 0: "Custom",
+    }
+
+    def build_live_embed(game: dict, linked: dict, champ_map: dict) -> discord.Embed:
+        queue_name = QUEUE_NAMES.get(game.get("gameQueueConfigId", 0), game.get("gameMode", "Unknown"))
+        game_start_ms = game.get("gameStartTime", 0)
+        elapsed = max(0, int(time.time() - game_start_ms / 1000)) if game_start_ms else game.get("gameLength", 0)
+        time_str = f"{elapsed // 60}m {elapsed % 60}s" if elapsed > 0 else "Loading screen"
+
+        blue = [p for p in game["participants"] if p["teamId"] == 100]
+        red = [p for p in game["participants"] if p["teamId"] == 200]
+
+        player_champ_id = next(
+            (p["championId"] for p in game["participants"] if linked["puuid"] in p.get("puuid", "")),
+            None
+        )
+
+        def fmt_team(players: list) -> str:
+            lines = []
+            for p in players:
+                champ = champ_map.get(p["championId"], str(p["championId"])) if champ_map else str(p["championId"])
+                name = p.get("riotId", p.get("summonerName", "Unknown"))
+                lines.append(f"`{champ}`\n{name}")
+            return "\n\n".join(lines)
+
+        embed = discord.Embed(
+            title=f"🔴 Live Game — {linked['game_name']}#{linked['tag_line']}",
+            color=discord.Color.red()
+        )
+        embed.add_field(name="Queue", value=queue_name, inline=True)
+        embed.add_field(name="Duration", value=time_str, inline=True)
+        embed.add_field(name="​", value="​", inline=True)
+        embed.add_field(name="🔵 Blue Team", value=fmt_team(blue), inline=True)
+        embed.add_field(name="🔴 Red Team", value=fmt_team(red), inline=True)
+
+        if player_champ_id and champ_map:
+            champ_name = champ_map.get(player_champ_id, "")
+            if champ_name:
+                embed.set_thumbnail(url=f"https://ddragon.leagueoflegends.com/cdn/15.1.1/img/champion/{champ_name}.png")
+
+        embed.set_footer(text="🔄 Last updated")
+        embed.timestamp = discord.utils.utcnow()
+
+        return embed
+
+    active_live_views: dict[str, "LiveGameView"] = {}
+
+    class LiveGameView(discord.ui.View):
+        def __init__(self, linked: dict):
+            super().__init__(timeout=300)
+            self.linked = linked
+            self.message: discord.Message | None = None
+
+            name_tag = f"{linked['game_name']}-{linked['tag_line']}".replace(" ", "%20")
+            self.add_item(discord.ui.Button(
+                label="Porofessor",
+                emoji="📊",
+                style=discord.ButtonStyle.link,
+                url=f"https://porofessor.gg/live/na/{name_tag}"
+            ))
+
+        async def disable(self) -> None:
+            discord.ui.View.stop(self)
+            active_live_views.pop(self.linked["puuid"], None)
+            if self.message:
+                try:
+                    await self.message.delete()
+                except (discord.NotFound, discord.HTTPException):
+                    pass
+
+        async def on_timeout(self) -> None:
+            await self.disable()
+
+        @discord.ui.button(label="Refresh", emoji="🔄", style=discord.ButtonStyle.primary)
+        async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+            await interaction.response.defer()
+            game = await get_live_game(api, self.linked["puuid"])
+            if game is None:
+                await self.disable()
+                await interaction.followup.send("Game has ended.", ephemeral=True)
+                return
+            champ_map = await get_champion_name_map()
+            embed = build_live_embed(game, self.linked, champ_map)
+            await interaction.edit_original_response(embed=embed, view=self)
+
+        @discord.ui.button(label="Stop Watching", emoji="⛔", style=discord.ButtonStyle.danger)
+        async def stop_watching(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+            await interaction.response.defer(ephemeral=True)
+            await self.disable()
+
     # Checks if a linked user is currently in a live game. Defaults to the caller if no user is
     # specified. Shows game mode, time elapsed, and both teams with champion names and Riot IDs.
+    # Includes a Refresh button to update the game state on demand. Supersedes any previous
+    # live tracking session for the same player.
     @roast.command(name="live", description="Check if you (or another linked user) are in a live game")
     async def live(interaction: discord.Interaction, user: discord.Member | None = None) -> None:
         await interaction.response.defer()
@@ -141,38 +236,15 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
             await interaction.followup.send(f"{noun} not currently in a game.")
             return
 
-        QUEUE_NAMES = {
-            420: "Ranked Solo/Duo", 440: "Ranked Flex", 450: "ARAM",
-            400: "Normal Draft", 430: "Normal Blind", 0: "Custom",
-        }
-        queue_name = QUEUE_NAMES.get(game.get("gameQueueConfigId", 0), game.get("gameMode", "Unknown"))
-
-        elapsed = game.get("gameLength", 0)
-        time_str = f"{elapsed // 60}m {elapsed % 60}s" if elapsed > 0 else "In loading screen"
+        existing = active_live_views.pop(linked["puuid"], None)
+        if existing:
+            await existing.disable()
 
         champ_map = await get_champion_name_map()
-
-        blue = [p for p in game["participants"] if p["teamId"] == 100]
-        red = [p for p in game["participants"] if p["teamId"] == 200]
-
-        def fmt_team(players: list) -> str:
-            lines = []
-            for p in players:
-                champ = champ_map.get(p["championId"], str(p["championId"])) if champ_map else str(p["championId"])
-                name = p.get("riotId", p.get("summonerName", "Unknown"))
-                lines.append(f"**{champ}** — {name}")
-            return "\n".join(lines)
-
-        embed = discord.Embed(
-            title=f"🔴 Live Game — {queue_name}",
-            description=f"⏱️ {time_str}",
-            color=discord.Color.red()
-        )
-        embed.add_field(name="🔵 Blue Team", value=fmt_team(blue), inline=True)
-        embed.add_field(name="🔴 Red Team", value=fmt_team(red), inline=True)
-        embed.set_footer(text=f"{linked['game_name']}#{linked['tag_line']}")
-
-        await interaction.followup.send(embed=embed)
+        embed = build_live_embed(game, linked, champ_map)
+        view = LiveGameView(linked)
+        active_live_views[linked["puuid"]] = view
+        view.message = await interaction.followup.send(embed=embed, view=view)
 
     # Builds and sends a leaderboard embed for all opted-in users who have linked Riot accounts.
     # Fetches Solo/Duo and Flex ranks for each user, sorts by rank, and displays them with
