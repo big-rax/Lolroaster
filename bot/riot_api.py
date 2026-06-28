@@ -1,3 +1,5 @@
+from io import BytesIO
+from PIL import Image
 from pyke import Continent, Region, Pyke, DataDragon
 import aiohttp
 
@@ -47,6 +49,47 @@ async def get_champion_mastery(api: Pyke, ddragon: DataDragon, puuid: str) -> li
         print(f"Riot API ERROR: {e}", flush=True)
         return None
     
+
+# Builds a mastery banner image: 2nd highest champ on the left (small), 1st highest in the
+# center (large), 3rd highest on the right (small). Returns a BytesIO PNG ready to attach.
+async def build_mastery_banner(masteries: list, patch: str) -> BytesIO:
+    center_size = 128
+    side_size = 96
+    gap = 8
+    canvas_w = side_size + gap + center_size + gap + side_size
+    canvas_h = center_size
+
+    canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+
+    # layout order: 2nd on left, 1st in center, 3rd on right
+    ordered = [masteries[1], masteries[0], masteries[2]]
+    sizes = [side_size, center_size, side_size]
+    x_positions = [0, side_size + gap, side_size + gap + center_size + gap]
+
+    async with aiohttp.ClientSession() as session:
+        for champ, size, x in zip(ordered, sizes, x_positions):
+            url = f"https://ddragon.leagueoflegends.com/cdn/{patch}/img/champion/{champ['championName']}.png"
+            async with session.get(url) as resp:
+                img_data = await resp.read()
+            img = Image.open(BytesIO(img_data)).convert("RGBA")
+            img = img.resize((size, size), Image.LANCZOS)
+            y = (canvas_h - size) // 2
+            canvas.paste(img, (x, y))
+
+    output = BytesIO()
+    canvas.save(output, format="PNG")
+    output.seek(0)
+    return output
+
+# Returns the latest LoL patch version string (e.g. "15.1.1") from Data Dragon.
+async def get_latest_patch() -> str:
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://ddragon.leagueoflegends.com/api/versions.json") as resp:
+                versions = await resp.json()
+                return versions[0]
+    except Exception:
+        return "15.1.1"
 
 async def get_champion_name_map() -> dict | None:
     try:

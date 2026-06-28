@@ -1,9 +1,11 @@
+import asyncio
 import time
 import discord
 from discord import app_commands
 from pyke import Continent, Pyke, exceptions, DataDragon
-from bot.riot_api import get_account_info, get_champion_mastery, get_all_ranks, rank_sort_key, get_live_game, get_champion_name_map
+from bot.riot_api import get_account_info, get_champion_mastery, get_all_ranks, rank_sort_key, get_live_game, get_champion_name_map, get_latest_patch, build_mastery_banner
 from bot.store import save_link, add_allowed_channel, remove_allowed_channel, get_allowed_channels, get_link, toggle_user_opt_in, get_all_links, is_user_opted_in
+from bot.config import BASE_DIR
 
 
 # Registers all slash commands with the Discord command tree.
@@ -13,14 +15,18 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
     async def ping(interaction: discord.Interaction) -> None:
         await interaction.response.send_message("pong (in python)")
 
-    @tree.command(name="freaky_command", description="does something freaky")
-    async def freaky_command(interaction: discord.Interaction) -> None:
+    @tree.command(name="freaky", description="does something freaky")
+    async def freaky(interaction: discord.Interaction) -> None:
         await interaction.response.send_message("😛😛😛lul")
+
+    roast = app_commands.Group(name="roast", description="Roast related commands")
+    riot = app_commands.Group(name="riot", description="Riot/League related commands")
+    channel = app_commands.Group(name="channel", description="Channel management commands")
 
     #@tree.command(name"Track", description="Tracks a user")
     # Looks up a Riot account by game name and tag line, saves the link to the calling user's
     # Discord ID, and replies with an embed showing their level and Solo/Duo rank.
-    @tree.command(name="riot_link", description="Links your Riot account")
+    @riot.command(name="link", description="Links your Riot account")
     async def riot_link(interaction: discord.Interaction, game_name: str, tag_line: str) -> None:
         await interaction.response.defer()
 
@@ -37,27 +43,41 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
             tag_line=info["tagLine"]
         )
 
-        rank=info["rank"]
+        rank = info["rank"]
+        rank_str = f"{rank['tier']} {rank['rank']} - {rank['leaguePoints']} LP" if rank else "Unranked"
 
-        rank_str= f"{rank['tier']} {rank['rank']} - {rank['leaguePoints']} LP" if rank else "Unranked"
+        masteries, patch = await asyncio.gather(
+            get_champion_mastery(api, ddragon, info["puuid"]),
+            get_latest_patch()
+        )
 
         embed = discord.Embed(title=f"{info['gameName']}#{info['tagLine']}", color=discord.Color.blue())
-
         embed.add_field(name="Level", value=str(info["summonerLevel"]), inline=True)
         embed.add_field(name="Solo/Duo Rank", value=rank_str, inline=True)
         embed.set_footer(text=f"Linked to {interaction.user.display_name}")
 
-        await interaction.followup.send(embed=embed)
+        if masteries and masteries[0].get("championName") == "Teemo":
+            embed.add_field(name="", value="This user might be on a list...😈", inline=False)
+
+        if masteries and len(masteries) >= 3:
+            banner = await build_mastery_banner(masteries, patch)
+            embed.set_image(url="attachment://mastery.png")
+            await interaction.followup.send(embed=embed, file=discord.File(banner, "mastery.png"))
+        else:
+            import os
+            cat = discord.File(os.path.join(BASE_DIR, "bot", "assets", "cat_laugh.png"), "cat_laugh.png")
+            embed.set_image(url="attachment://cat_laugh.png")
+            await interaction.followup.send(embed=embed, file=cat)
 
     # Fetches the top champion masteries for the calling user's linked Riot account
     # and displays them in an embed ordered by mastery points.
-    @tree.command(name="league_mastery", description="Displays your top champion masteries")
+    @riot.command(name="mastery", description="Displays your top champion masteries")
     async def league_mastery(interaction: discord.Interaction) -> None:
         await interaction.response.defer()
 
         linked = get_link(str(interaction.user.id))
         if linked is None:
-            await interaction.followup.send("You haven't linked a Riot account yet! Use /riot_link first.")
+            await interaction.followup.send("You haven't linked a Riot account yet! Use /riot link first.")
             return
 
         masteries = await get_champion_mastery(api, ddragon, linked["puuid"])
@@ -77,28 +97,25 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
         await interaction.followup.send(embed=embed)
 
     # Adds the current channel to the bot's allowed list so it can send messages and reactions there.
-    @tree.command(name="set_channel", description="Sets the channel in which the bot is allowed to message, react, etc.")
+    @channel.command(name="set", description="Sets the channel in which the bot is allowed to message, react, etc.")
     async def set_channel(interaction: discord.Interaction) -> None:
         add_allowed_channel(str(interaction.channel_id), str(interaction.guild_id))
         await interaction.response.send_message(f"✅ Lolroaster will now react (roast) users in <#{interaction.channel_id}>")
 
     # Removes the current channel from the bot's allowed list.
-    @tree.command(name="remove_allowed_channel", description="Removes an allowed channel")
+    @channel.command(name="remove", description="Removes an allowed channel")
     async def removed_allowed_channel(interaction: discord.Interaction) -> None:
         remove_allowed_channel(str(interaction.channel_id))
         await interaction.response.send_message(f"😶‍🌫️ Lolroaster will no longer yap in <#{interaction.channel_id}>")
 
     # Lists all channels in the server that the bot is currently allowed to operate in.
-    @tree.command(name="list_channels",description="List all allowed channels in a server")
+    @channel.command(name="list", description="List all allowed channels in a server")
     async def list_channels(interaction: discord.Interaction) -> None:
         channels = get_allowed_channels(str(interaction.guild_id))
         if not channels:
-            return interaction.response.send_message("There are no channels currently set, please use /set_channel to add a channel!")
+            return interaction.response.send_message("There are no channels currently set, please use /channel set to add a channel!")
         channel_mentions = "\n".join([f"<#{cid}>" for cid in channels])
         await interaction.response.send_message(f"Allowed channels:{channel_mentions}")
-
-
-    roast = app_commands.Group(name="roast", description="Roast related commands")
 
     # Toggles the calling user's opt-in status for bot interactions (roasts, leaderboard, etc.).
     # Responds ephemerally so only the user sees the confirmation.
@@ -112,7 +129,7 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
 
     # Admin-only: toggles opt-in status for any server member selected via a user picker.
     # Blocked for non-admins. Responds ephemerally so only the admin sees the confirmation.
-    @roast.command(name="toggle_user", description="(Admin) Toggle opt-in status for a specific user")
+    @roast.command(name="toggle-user", description="(Admin) Toggle opt-in status for a specific user")
     async def toggle_user(interaction: discord.Interaction, user: discord.Member) -> None:
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
@@ -246,11 +263,95 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
         active_live_views[linked["puuid"]] = view
         view.message = await interaction.followup.send(embed=embed, view=view)
 
+    # Displays the calling user's currently linked Riot account and their Solo/Duo and Flex ranks.
+    # Uses Components V2 layout with a container, section header, rank blocks, and footer.
+    # Notifies the user if they haven't linked an account yet.
+    @riot.command(name="account", description="Displays your currently linked Riot account")
+    async def account(interaction: discord.Interaction) -> None:
+        try:
+            await interaction.response.defer()
+
+            linked = get_link(str(interaction.user.id))
+            if linked is None:
+                await interaction.followup.send("You don't have a linked Riot account. Use /riot link to link one!")
+                return
+
+            ranks, masteries, patch = await asyncio.gather(
+                get_all_ranks(api, linked["puuid"]),
+                get_champion_mastery(api, ddragon, linked["puuid"]),
+                get_latest_patch()
+            )
+            solo = ranks["solo"]
+            flex = ranks["flex"]
+
+            def rank_str(entry: dict | None) -> str:
+                if not entry:
+                    return "Unranked"
+                return f"{entry['tier'].capitalize()} {entry['rank']} — {entry['leaguePoints']:,} LP"
+
+            def rank_emoji(entry: dict | None) -> str:
+                if not entry:
+                    return "⬜"
+                icons = {
+                    "iron": "<:7574iron:1517989092288233513>",
+                    "bronze": "<:1184bronze:1517989087674368171>",
+                    "silver": "<:7455silver:1517989093135355954>",
+                    "gold": "<:1053gold:1517989094473470013>",
+                    "platinum": "<:3978platinum:1517989095794806804>",
+                    "emerald": "💚",
+                    "diamond": "<:1053diamond:1517989089847017674>",
+                    "master": "<:9231master:1517989091436658919>",
+                    "grandmaster": "<:9476grandmaster:1517989098285961216>",
+                    "challenger": "<:9476challenger:1517989097094910092>",
+                }
+                return icons.get(entry["tier"].lower(), "⬜")
+
+            summoner_name = f"{linked['game_name']}#{linked['tag_line']}"
+
+            container = discord.ui.Container(accent_colour=discord.Colour.blue())
+
+            header = discord.ui.Section(
+                discord.ui.TextDisplay(f"# {summoner_name}"),
+                accessory=discord.ui.Thumbnail(
+                    media=interaction.user.display_avatar.url,
+                    description=interaction.user.display_name
+                )
+            )
+
+            container.add_item(header)
+            container.add_item(discord.ui.Separator())
+            container.add_item(discord.ui.TextDisplay(f"**Solo/Duo** {rank_emoji(solo)}\n{rank_str(solo)}"))
+            container.add_item(discord.ui.TextDisplay(f"**Flex** {rank_emoji(flex)}\n{rank_str(flex)}"))
+            container.add_item(discord.ui.Separator())
+            container.add_item(discord.ui.TextDisplay(f"-# Linked to {interaction.user.display_name}"))
+
+            files = []
+            if masteries and len(masteries) >= 3:
+                banner = await build_mastery_banner(masteries, patch)
+                banner_file = discord.File(banner, "mastery.png")
+                files.append(banner_file)
+                container.add_item(discord.ui.Separator())
+                container.add_item(discord.ui.MediaGallery(
+                    discord.MediaGalleryItem(media=discord.UnfurledMediaItem("attachment://mastery.png"))
+                ))
+
+            if masteries and masteries[0].get("championName") == "Teemo":
+                container.add_item(discord.ui.TextDisplay("This user might be on a list...😈"))
+
+            layout = discord.ui.LayoutView()
+            layout.add_item(container)
+            await interaction.followup.send(view=layout, files=files)
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            await interaction.followup.send(content=str(e))
+
     # Builds and sends a leaderboard embed for all opted-in users who have linked Riot accounts.
     # Fetches Solo/Duo and Flex ranks for each user, sorts by rank, and displays them with
     # tier/division emojis and LP. Ranked players are shown above a separator from unranked ones.
     # Embed color reflects the highest-ranked Solo/Duo player's tier.
-    @roast.command(name="leaderboard", description="Shows the server's ranked leaderboard")
+    @riot.command(name="leaderboard", description="Shows the server's ranked leaderboard")
     async def leaderboard(interaction: discord.Interaction) -> None:
         try:
             await interaction.response.defer()
@@ -352,3 +453,5 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
             await interaction.followup.send(content=str(e))
 
     tree.add_command(roast)
+    tree.add_command(riot)
+    tree.add_command(channel)
