@@ -191,9 +191,10 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
 
     class LiveGameView(discord.ui.View):
         def __init__(self, linked: dict):
-            super().__init__(timeout=300)
+            super().__init__(timeout=None)
             self.linked = linked
             self.message: discord.Message | None = None
+            self._poll_task: asyncio.Task | None = None
 
             name_tag = f"{linked['game_name']}-{linked['tag_line']}".replace(" ", "%20")
             self.add_item(discord.ui.Button(
@@ -203,7 +204,42 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
                 url=f"https://porofessor.gg/live/na/{name_tag}"
             ))
 
+        def start_polling(self) -> None:
+            self._poll_task = asyncio.create_task(self._poll_loop())
+
+        async def _poll_loop(self) -> None:
+            while True:
+                await asyncio.sleep(60)
+                if self.message is None:
+                    break
+                game = await get_live_game(api, self.linked["puuid"])
+                if game is None:
+                    embed = discord.Embed(
+                        title=f"⬛ Game Over — {self.linked['game_name']}#{self.linked['tag_line']}",
+                        description="The game has ended.",
+                        color=discord.Color.dark_gray()
+                    )
+                    for child in self.children:
+                        if isinstance(child, discord.ui.Button) and child.style != discord.ButtonStyle.link:
+                            child.disabled = True
+                    try:
+                        await self.message.edit(embed=embed, view=self)
+                    except (discord.NotFound, discord.HTTPException):
+                        pass
+                    discord.ui.View.stop(self)
+                    active_live_views.pop(self.linked["puuid"], None)
+                    break
+                else:
+                    champ_map = await get_champion_name_map()
+                    embed = build_live_embed(game, self.linked, champ_map)
+                    try:
+                        await self.message.edit(embed=embed, view=self)
+                    except (discord.NotFound, discord.HTTPException):
+                        break
+
         async def disable(self) -> None:
+            if self._poll_task and not self._poll_task.done():
+                self._poll_task.cancel()
             discord.ui.View.stop(self)
             active_live_views.pop(self.linked["puuid"], None)
             if self.message:
@@ -211,9 +247,6 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
                     await self.message.delete()
                 except (discord.NotFound, discord.HTTPException):
                     pass
-
-        async def on_timeout(self) -> None:
-            await self.disable()
 
         @discord.ui.button(label="Refresh", emoji="🔄", style=discord.ButtonStyle.primary)
         async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -232,25 +265,17 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
             await interaction.response.defer(ephemeral=True)
             await self.disable()
 
-    # Checks if a linked user is currently in a live game. Defaults to the caller if no user is
-    # specified. Shows game mode, time elapsed, and both teams with champion names and Riot IDs.
-    # Includes a Refresh button to update the game state on demand. Supersedes any previous
-    # live tracking session for the same player.
-    @roast.command(name="live", description="Check if you (or another linked user) are in a live game")
-    async def live(interaction: discord.Interaction, user: discord.Member | None = None) -> None:
-        await interaction.response.defer()
-
-        target = user or interaction.user
+    async def _start_live_tracking(interaction: discord.Interaction, target: discord.Member) -> None:
         linked = get_link(str(target.id))
         if linked is None:
-            noun = "You haven't" if user is None else f"{target.display_name} hasn't"
-            await interaction.followup.send(f"{noun} linked a Riot account yet.")
+            noun = "You haven't" if target.id == interaction.user.id else f"{target.display_name} hasn't"
+            await interaction.followup.send(f"{noun} linked a Riot account yet.", ephemeral=True)
             return
 
         game = await get_live_game(api, linked["puuid"])
         if game is None:
-            noun = "You're" if user is None else f"{target.display_name} is"
-            await interaction.followup.send(f"{noun} not currently in a game.")
+            noun = "You're" if target.id == interaction.user.id else f"{target.display_name} is"
+            await interaction.followup.send(f"{noun} not currently in a game.", ephemeral=True)
             return
 
         existing = active_live_views.pop(linked["puuid"], None)
@@ -261,7 +286,42 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
         embed = build_live_embed(game, linked, champ_map)
         view = LiveGameView(linked)
         active_live_views[linked["puuid"]] = view
-        view.message = await interaction.followup.send(embed=embed, view=view)
+        view.message = await interaction.channel.send(embed=embed, view=view)
+        view.start_polling()
+
+    class LiveUserSelectView(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=60)
+
+        @discord.ui.select(cls=discord.ui.UserSelect, placeholder="Choose a player to track...")
+        async def user_select(self, interaction: discord.Interaction, select: discord.ui.UserSelect) -> None:
+            target = select.values[0]
+            await interaction.response.edit_message(content=f"Checking {target.display_name}'s game...", view=None)
+            await _start_live_tracking(interaction, target)
+
+    class LiveModeView(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=60)
+
+        @discord.ui.select(
+            placeholder="Who do you want to track?",
+            options=[
+                discord.SelectOption(label="Myself", value="self", emoji="😏"),
+                discord.SelectOption(label="Another player", value="target", emoji="🫃"),
+            ]
+        )
+        async def mode_select(self, interaction: discord.Interaction, select: discord.ui.Select) -> None:
+            if select.values[0] == "self":
+                await interaction.response.edit_message(content="Checking your game...", view=None)
+                await _start_live_tracking(interaction, interaction.user)
+            else:
+                await interaction.response.edit_message(content="Select a player to track:", view=LiveUserSelectView())
+
+    # Shows an ephemeral prompt to choose between tracking yourself or another player.
+    # Auto-updates the public game embed every 60 seconds and detects when the game ends.
+    @roast.command(name="live", description="Track a live game — yours or another player's")
+    async def live(interaction: discord.Interaction) -> None:
+        await interaction.response.send_message("Who do you want to track?", view=LiveModeView(), ephemeral=True)
 
     # Displays the calling user's currently linked Riot account and their Solo/Duo and Flex ranks.
     # Uses Components V2 layout with a container, section header, rank blocks, and footer.
@@ -355,35 +415,14 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
     async def leaderboard(interaction: discord.Interaction) -> None:
         try:
             await interaction.response.defer()
+        except discord.NotFound:
+            return
 
+        try:
             links = get_all_links()
             if not links:
                 await interaction.followup.send("No one has linked their account yet! Use /riot_link first.")
                 return
-
-            solo_entries = []
-            flex_entries = []
-
-            for link in links:
-                if not is_user_opted_in(link["discord_id"]):
-                    continue
-
-                member = interaction.guild.get_member(int(link["discord_id"]))
-                if member is None:
-                    try:
-                        member = await interaction.guild.fetch_member(int(link["discord_id"]))
-                    except discord.NotFound:
-                        continue
-
-                ranks = await get_all_ranks(api, link["puuid"])
-                riot_name = f"{link['game_name']}#{link['tag_line']}"
-                extra = {"name": riot_name, "display_name": member.display_name}
-
-                solo_entries.append({**ranks["solo"], **extra} if ranks["solo"] else extra)
-                flex_entries.append({**ranks["flex"], **extra} if ranks["flex"] else extra)
-
-            solo_entries.sort(key=rank_sort_key, reverse=True)
-            flex_entries.sort(key=rank_sort_key, reverse=True)
 
             TIER_EMOJI = {
                 "iron": "<:7574iron:1517989092288233513>",
@@ -406,51 +445,76 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
                 "challenger": 0xF4C874,
             }
 
-            top_tier = next((e["tier"].lower() for e in solo_entries if "tier" in e), None)
+            player_entries = []
+            for link in links:
+                if not is_user_opted_in(link["discord_id"]):
+                    continue
+
+                member = interaction.guild.get_member(int(link["discord_id"]))
+                if member is None:
+                    try:
+                        member = await interaction.guild.fetch_member(int(link["discord_id"]))
+                    except discord.NotFound:
+                        continue
+
+                ranks = await get_all_ranks(api, link["puuid"])
+                player_entries.append({
+                    "display_name": member.display_name,
+                    "riot_name": f"{link['game_name']}#{link['tag_line']}",
+                    "solo": ranks["solo"],
+                    "flex": ranks["flex"],
+                })
+
+            player_entries.sort(
+                key=lambda p: (rank_sort_key(p["solo"]), rank_sort_key(p["flex"])),
+                reverse=True
+            )
+
+            def fmt_rank(entry: dict | None) -> str:
+                if not entry or "tier" not in entry:
+                    return "Unranked"
+                tier_lower = entry["tier"].lower()
+                div_emoji = DIVISION_EMOJI.get(entry["rank"], "") if tier_lower in TIERED else ""
+                return f"{entry['tier'].capitalize()} {entry['rank']} {div_emoji} {entry['leaguePoints']:,} LP"
+
+            def format_player(i: int, p: dict) -> str:
+                solo_ranked = p["solo"] and "tier" in p["solo"]
+                best = p["solo"] if solo_ranked else p["flex"]
+                tier_emoji = TIER_EMOJI.get(best["tier"].lower(), "")
+                medal = ["🥇", "🥈", "🥉"][i] if i < 3 else f"`{i+1}.`"
+                header = f"{medal} {tier_emoji} **{p['display_name']}** ({p['riot_name']})"
+                stats = f"-# Solo: {fmt_rank(p['solo'])}  ·  Flex: {fmt_rank(p['flex'])}"
+                return f"{header}\n{stats}"
+
+            ranked = [p for p in player_entries if (p["solo"] and "tier" in p["solo"]) or (p["flex"] and "tier" in p["flex"])]
+            unranked = [p for p in player_entries if p not in ranked]
+
+            lines = [format_player(i, p) for i, p in enumerate(ranked)]
+            if ranked and unranked:
+                lines.append("───────────────\n**Grass Touchers**")
+            for p in unranked:
+                lines.append(f"-# **{p['display_name']}** ({p['riot_name']}) — Unranked")
+
+            top_tier = None
+            if ranked:
+                best = ranked[0]["solo"] if (ranked[0]["solo"] and "tier" in ranked[0]["solo"]) else ranked[0]["flex"]
+                if best and "tier" in best:
+                    top_tier = best["tier"].lower()
             embed_color = discord.Color(TIER_COLOR[top_tier]) if top_tier else discord.Color.fuchsia()
 
-            def format_entry(i: int, e: dict) -> str:
-                medal = ["🥇", "🥈", "🥉"][i] if i < 3 else f"`{i+1}.`"
-                label = f"**{e['display_name']}** ({e['name']})"
-                tier_lower = e["tier"].lower()
-                tier_emoji = TIER_EMOJI.get(tier_lower, "")
-                div_emoji = DIVISION_EMOJI.get(e["rank"], "") if tier_lower in TIERED else ""
-                return f"{medal} {tier_emoji} {label} — {e['tier'].capitalize()} {e['rank']} {div_emoji} {e['leaguePoints']:,} LP"
-
-            def build_field(entries: list) -> str:
-                ranked = [e for e in entries if "tier" in e]
-                unranked = [e for e in entries if "tier" not in e]
-                lines = [format_entry(i, e) for i, e in enumerate(ranked)]
-                if ranked and unranked:
-                    lines.append("───────────────\n**Grass Touchers**")
-                for e in unranked:
-                    lines.append(f"-# {e['display_name']} ({e['name']}) — Unranked")
-                return "\n".join(lines) if lines else None
-
             embed = discord.Embed(title="🏆 Server Leaderboard", color=embed_color)
-
-            embed.add_field(
-                name="Solo/Duo Queue",
-                value=build_field(solo_entries) or "No players yet.",
-                inline=False
-            )
-
-            embed.add_field(name="​", value="​", inline=False)
-
-            embed.add_field(
-                name="Flex Queue",
-                value=build_field(flex_entries) or "No players yet.",
-                inline=False
-            )
-
+            embed.add_field(name="Rankings", value="\n".join(lines) or "No players yet.", inline=False)
             embed.set_footer(text=f"Requested by {interaction.user.display_name}")
 
             await interaction.followup.send(embed=embed)
 
-        except Exception as e:
+        except Exception:
             import traceback
             traceback.print_exc()
-            await interaction.followup.send(content=str(e))
+            try:
+                await interaction.followup.send(content="Something went wrong building the leaderboard.", ephemeral=True)
+            except Exception:
+                pass
 
     tree.add_command(roast)
     tree.add_command(riot)
