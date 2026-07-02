@@ -3,7 +3,7 @@ import time
 import discord
 from discord import app_commands
 from pyke import Continent, Pyke, exceptions, DataDragon
-from bot.riot_api import get_account_info, get_champion_mastery, get_all_ranks, rank_sort_key, get_live_game, get_champion_name_map, get_latest_patch, build_mastery_banner
+from bot.riot_api import get_account_info, get_champion_mastery, get_all_ranks, rank_sort_key, get_live_game, get_match_result, get_champion_name_map, get_latest_patch, build_mastery_banner
 from bot.store import save_link, add_allowed_channel, remove_allowed_channel, get_allowed_channels, get_link, toggle_user_opt_in, get_all_links, is_user_opted_in
 from bot.config import BASE_DIR
 
@@ -195,6 +195,7 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
             self.linked = linked
             self.message: discord.Message | None = None
             self._poll_task: asyncio.Task | None = None
+            self.game_id: int | None = None
 
             name_tag = f"{linked['game_name']}-{linked['tag_line']}".replace(" ", "%20")
             self.add_item(discord.ui.Button(
@@ -214,22 +215,55 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
                     break
                 game = await get_live_game(api, self.linked["puuid"])
                 if game is None:
-                    embed = discord.Embed(
-                        title=f"⬛ Game Over — {self.linked['game_name']}#{self.linked['tag_line']}",
-                        description="The game has ended.",
-                        color=discord.Color.dark_gray()
-                    )
                     for child in self.children:
                         if isinstance(child, discord.ui.Button) and child.style != discord.ButtonStyle.link:
                             child.disabled = True
+                    discord.ui.View.stop(self)
+                    active_live_views.pop(self.linked["puuid"], None)
+
+                    pending = discord.Embed(
+                        title=f"⬛ Game Over — {self.linked['game_name']}#{self.linked['tag_line']}",
+                        description="Fetching result...",
+                        color=discord.Color.dark_gray()
+                    )
+                    try:
+                        await self.message.edit(embed=pending, view=self)
+                    except (discord.NotFound, discord.HTTPException):
+                        break
+
+                    result = None
+                    for _ in range(5):
+                        await asyncio.sleep(60)
+                        result = await get_match_result(api, self.linked["puuid"], self.game_id)
+                        if result:
+                            break
+
+                    if result:
+                        color = discord.Color.green() if result["win"] else discord.Color.red()
+                        icon = "<:73494mogger:1522030305647788173>" if result["win"] else "<:50009catlaughing:1522030042044174396>"
+                        outcome = "Victory" if result["win"] else "Defeat"
+                        embed = discord.Embed(
+                            title=f"{icon} {outcome} — {self.linked['game_name']}#{self.linked['tag_line']}",
+                            color=color
+                        )
+                        embed.add_field(name="Champion", value=result["championName"], inline=True)
+                        embed.add_field(name="KDA", value=f"{result['kills']}/{result['deaths']}/{result['assists']}", inline=True)
+                        mins, secs = divmod(result["gameDuration"], 60)
+                        embed.add_field(name="Duration", value=f"{mins}m {secs}s", inline=True)
+                    else:
+                        embed = discord.Embed(
+                            title=f"⬛ Game Over — {self.linked['game_name']}#{self.linked['tag_line']}",
+                            description="The game has ended.",
+                            color=discord.Color.dark_gray()
+                        )
                     try:
                         await self.message.edit(embed=embed, view=self)
                     except (discord.NotFound, discord.HTTPException):
                         pass
-                    discord.ui.View.stop(self)
-                    active_live_views.pop(self.linked["puuid"], None)
                     break
                 else:
+                    if self.game_id is None:
+                        self.game_id = game.get("gameId")
                     champ_map = await get_champion_name_map()
                     embed = build_live_embed(game, self.linked, champ_map)
                     try:
@@ -322,6 +356,64 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
     @roast.command(name="live", description="Track a live game — yours or another player's")
     async def live(interaction: discord.Interaction) -> None:
         await interaction.response.send_message("Who do you want to track?", view=LiveModeView(), ephemeral=True)
+
+    async def _show_last_game(interaction: discord.Interaction, target: discord.Member) -> None:
+        linked = get_link(str(target.id))
+        if linked is None:
+            noun = "You haven't" if target.id == interaction.user.id else f"{target.display_name} hasn't"
+            await interaction.followup.send(f"{noun} linked a Riot account yet.", ephemeral=True)
+            return
+
+        result = await get_match_result(api, linked["puuid"])
+        if result is None:
+            await interaction.followup.send("Couldn't find a recent game.", ephemeral=True)
+            return
+
+        color = discord.Color.green() if result["win"] else discord.Color.red()
+        icon = "<:73494mogger:1522030305647788173>" if result["win"] else "<:50009catlaughing:1522030042044174396>"
+        outcome = "Victory" if result["win"] else "Defeat"
+        embed = discord.Embed(
+            title=f"{icon} {outcome} — {linked['game_name']}#{linked['tag_line']}",
+            color=color
+        )
+        embed.add_field(name="Champion", value=result["championName"], inline=True)
+        embed.add_field(name="KDA", value=f"{result['kills']}/{result['deaths']}/{result['assists']}", inline=True)
+        mins, secs = divmod(result["gameDuration"], 60)
+        embed.add_field(name="Duration", value=f"{mins}m {secs}s", inline=True)
+        await interaction.channel.send(embed=embed)
+
+    class LastGameUserSelectView(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=60)
+
+        @discord.ui.select(cls=discord.ui.UserSelect, placeholder="Choose a player...")
+        async def user_select(self, interaction: discord.Interaction, select: discord.ui.UserSelect) -> None:
+            target = select.values[0]
+            await interaction.response.edit_message(content=f"Fetching {target.display_name}'s last game...", view=None)
+            await _show_last_game(interaction, target)
+
+    class LastGameModeView(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=60)
+
+        @discord.ui.select(
+            placeholder="Whose last game?",
+            options=[
+                discord.SelectOption(label="Mine", value="self", emoji="🎮"),
+                discord.SelectOption(label="Another player", value="target", emoji="🎯"),
+            ]
+        )
+        async def mode_select(self, interaction: discord.Interaction, select: discord.ui.Select) -> None:
+            if select.values[0] == "self":
+                await interaction.response.edit_message(content="Fetching your last game...", view=None)
+                await _show_last_game(interaction, interaction.user)
+            else:
+                await interaction.response.edit_message(content="Select a player:", view=LastGameUserSelectView())
+
+    # Fetches and displays the most recent match for the selected player.
+    @roast.command(name="lastgame", description="Show the last game you or another player played")
+    async def lastgame(interaction: discord.Interaction) -> None:
+        await interaction.response.send_message("Whose last game?", view=LastGameModeView(), ephemeral=True)
 
     # Displays the calling user's currently linked Riot account and their Solo/Duo and Flex ranks.
     # Uses Components V2 layout with a container, section header, rank blocks, and footer.

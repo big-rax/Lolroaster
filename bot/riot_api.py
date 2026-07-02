@@ -126,6 +126,36 @@ def rank_sort_key(entry: dict) -> tuple:
     division_index = DIVISION_ORDER.get(entry.get("rank", ""), 0)
     return (tier_index, division_index, entry["leaguePoints"])
 
+# Fetches the result of a specific tracked game by PUUID and game ID.
+# Checks the 5 most recent matches and returns the one matching game_id, or None if not indexed yet.
+async def get_match_result(api: Pyke, puuid: str, game_id: int | None = None) -> dict | None:
+    try:
+        match_ids = await api.match.match_ids_by_puuid(Continent.AMERICAS, puuid, count=5)
+        if not match_ids:
+            return None
+        for match_id in match_ids:
+            match = await api.match.by_match_id(Continent.AMERICAS, match_id)
+            if game_id and match["info"].get("gameId") != game_id:
+                continue
+            participant = next(
+                (p for p in match["info"]["participants"] if p["puuid"] == puuid),
+                None
+            )
+            if not participant:
+                continue
+            return {
+                "win": participant["win"],
+                "kills": participant["kills"],
+                "deaths": participant["deaths"],
+                "assists": participant["assists"],
+                "championName": participant["championName"],
+                "gameDuration": match["info"]["gameDuration"],
+            }
+        return None
+    except Exception as e:
+        print(f"Match API ERROR: {e}", flush=True)
+        return None
+
 # Fetches the current live game for a player by PUUID.
 # Returns the full game data dict if in a game, or None if not in one.
 async def get_live_game(api: Pyke, puuid: str) -> dict | None:
