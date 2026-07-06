@@ -143,16 +143,28 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
     QUEUE_NAMES = {
         420: "Ranked Solo/Duo", 440: "Ranked Flex", 450: "ARAM",
         400: "Normal Draft", 430: "Normal Blind", 0: "Custom",
+        900: "URF", 1900: "URF", 1020: "One for All",
+        1300: "Nexus Blitz", 1700: "Arena", 1900: "URF",
+    }
+    GAME_MODE_NAMES = {
+        "KIWI": "ARAM Mayhem", "CHERRY": "Arena", "URF": "URF",
+        "ONEFORALL": "One for All", "NEXUSBLITZ": "Nexus Blitz",
+        "ULTBOOK": "Ultimate Spellbook", "TUTORIAL": "Tutorial",
     }
 
-    def build_live_embed(game: dict, linked: dict, champ_map: dict) -> discord.Embed:
-        queue_name = QUEUE_NAMES.get(game.get("gameQueueConfigId", 0), game.get("gameMode", "Unknown"))
+    def build_live_embed(game: dict, linked: dict, champ_map: dict, patch: str = "15.1.1") -> discord.Embed:
+        raw_mode = game.get("gameMode", "Unknown")
+        queue_name = QUEUE_NAMES.get(
+            game.get("gameQueueConfigId", 0),
+            GAME_MODE_NAMES.get(raw_mode, raw_mode)
+        )
         game_start_ms = game.get("gameStartTime", 0)
         elapsed = max(0, int(time.time() - game_start_ms / 1000)) if game_start_ms else game.get("gameLength", 0)
         time_str = f"{elapsed // 60}m {elapsed % 60}s" if elapsed > 0 else "Loading screen"
 
         blue = [p for p in game["participants"] if p["teamId"] == 100]
         red = [p for p in game["participants"] if p["teamId"] == 200]
+
 
         player_champ_id = next(
             (p["championId"] for p in game["participants"] if linked["puuid"] in p.get("puuid", "")),
@@ -180,7 +192,7 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
         if player_champ_id and champ_map:
             champ_name = champ_map.get(player_champ_id, "")
             if champ_name:
-                embed.set_thumbnail(url=f"https://ddragon.leagueoflegends.com/cdn/15.1.1/img/champion/{champ_name}.png")
+                embed.set_thumbnail(url=f"https://ddragon.leagueoflegends.com/cdn/{patch}/img/champion/{champ_name}.png")
 
         embed.set_footer(text="🔄 Last updated")
         embed.timestamp = discord.utils.utcnow()
@@ -196,6 +208,7 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
             self.message: discord.Message | None = None
             self._poll_task: asyncio.Task | None = None
             self.game_id: int | None = None
+            self.patch: str = "15.1.1"
 
             name_tag = f"{linked['game_name']}-{linked['tag_line']}".replace(" ", "%20")
             self.add_item(discord.ui.Button(
@@ -246,6 +259,7 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
                             title=f"{icon} {outcome} — {self.linked['game_name']}#{self.linked['tag_line']}",
                             color=color
                         )
+                        embed.set_thumbnail(url=f"https://ddragon.leagueoflegends.com/cdn/{self.patch}/img/champion/{result['championName']}.png")
                         embed.add_field(name="Champion", value=result["championName"], inline=True)
                         embed.add_field(name="KDA", value=f"{result['kills']}/{result['deaths']}/{result['assists']}", inline=True)
                         mins, secs = divmod(result["gameDuration"], 60)
@@ -265,7 +279,7 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
                     if self.game_id is None:
                         self.game_id = game.get("gameId")
                     champ_map = await get_champion_name_map()
-                    embed = build_live_embed(game, self.linked, champ_map)
+                    embed = build_live_embed(game, self.linked, champ_map, self.patch)
                     try:
                         await self.message.edit(embed=embed, view=self)
                     except (discord.NotFound, discord.HTTPException):
@@ -291,7 +305,7 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
                 await interaction.followup.send("Game has ended.", ephemeral=True)
                 return
             champ_map = await get_champion_name_map()
-            embed = build_live_embed(game, self.linked, champ_map)
+            embed = build_live_embed(game, self.linked, champ_map, self.patch)
             await interaction.edit_original_response(embed=embed, view=self)
 
         @discord.ui.button(label="Stop Watching", emoji="⛔", style=discord.ButtonStyle.danger)
@@ -316,9 +330,10 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
         if existing:
             await existing.disable()
 
-        champ_map = await get_champion_name_map()
-        embed = build_live_embed(game, linked, champ_map)
+        champ_map, patch = await asyncio.gather(get_champion_name_map(), get_latest_patch())
+        embed = build_live_embed(game, linked, champ_map, patch)
         view = LiveGameView(linked)
+        view.patch = patch
         active_live_views[linked["puuid"]] = view
         view.message = await interaction.channel.send(embed=embed, view=view)
         view.start_polling()
@@ -364,7 +379,10 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
             await interaction.followup.send(f"{noun} linked a Riot account yet.", ephemeral=True)
             return
 
-        result = await get_match_result(api, linked["puuid"])
+        result, patch = await asyncio.gather(
+            get_match_result(api, linked["puuid"]),
+            get_latest_patch()
+        )
         if result is None:
             await interaction.followup.send("Couldn't find a recent game.", ephemeral=True)
             return
@@ -376,6 +394,7 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
             title=f"{icon} {outcome} — {linked['game_name']}#{linked['tag_line']}",
             color=color
         )
+        embed.set_thumbnail(url=f"https://ddragon.leagueoflegends.com/cdn/{patch}/img/champion/{result['championName']}.png")
         embed.add_field(name="Champion", value=result["championName"], inline=True)
         embed.add_field(name="KDA", value=f"{result['kills']}/{result['deaths']}/{result['assists']}", inline=True)
         mins, secs = divmod(result["gameDuration"], 60)
@@ -399,8 +418,8 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
         @discord.ui.select(
             placeholder="Whose last game?",
             options=[
-                discord.SelectOption(label="Mine", value="self", emoji="🎮"),
-                discord.SelectOption(label="Another player", value="target", emoji="🎯"),
+                discord.SelectOption(label="Mine", value="self", emoji="🤓"),
+                discord.SelectOption(label="Another player", value="target", emoji="🫃"),
             ]
         )
         async def mode_select(self, interaction: discord.Interaction, select: discord.ui.Select) -> None:
