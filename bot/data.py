@@ -11,7 +11,7 @@ TRIGGERS = {
         "type": "reply",
         "responses": [
             "Reminder to stop eating kfc you walnut",
-            "Mmmm chinken",
+            "Mmmm chimken",
             "Is Mr. Sanders in?",
         ],
     },
