@@ -1,0 +1,6 @@
+discord.py
+python-dotenv
+aiohttp
+Pillow
+pyke-lol
+psycopg[binary]

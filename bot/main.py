@@ -5,6 +5,7 @@ from pyke import Pyke, DataDragon
 from .commands import register_commands
 from .config import TOKEN, RIOT_API_KEY
 from .events import register_events
+from .settings_ui import WelcomeView, DmSetupButton, DmSkipButton
 from .store import init_db
 
 
@@ -18,6 +19,8 @@ def build_client(api, ddragon) -> tuple[discord.Client, discord.app_commands.Com
 
     register_commands(tree, api, ddragon)
     register_events(client, tree)
+    client.add_view(WelcomeView())  # keeps welcome-message buttons working after restarts
+    client.add_dynamic_items(DmSetupButton, DmSkipButton)  # same for the DM version
 
     return client, tree
 

@@ -1,6 +1,6 @@
 import random
 import re
-from .store import is_channel_allowed, is_user_opted_in
+from .store import is_bot_active, is_user_opted_in
 import discord
 
 from .data import WORDLE_RESPONSES, fresh_wordle_scores
@@ -34,7 +34,7 @@ def parse_wordle_summary(raw_content: str) -> dict[str, list[str]]:
 
 
 async def handle_wordle_message(message: discord.Message) -> bool:
-    if not is_channel_allowed(message.channel.id):
+    if not is_bot_active(str(message.guild.id) if message.guild else None, str(message.channel.id)):
         return
     
     raw_content = message.content

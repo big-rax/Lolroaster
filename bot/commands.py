@@ -1,11 +1,15 @@
+from __future__ import annotations
 import asyncio
+import random
 import time
 import discord
 from discord import app_commands
 from pyke import Continent, Pyke, exceptions, DataDragon
 from bot.riot_api import get_account_info, get_champion_mastery, get_all_ranks, rank_sort_key, get_live_game, get_match_result, get_champion_name_map, get_latest_patch, build_mastery_banner
-from bot.store import save_link, add_allowed_channel, remove_allowed_channel, get_allowed_channels, get_link, toggle_user_opt_in, get_all_links, is_user_opted_in
+from bot.store import save_link, get_allowed_channels, get_link, toggle_user_opt_in, get_all_links, is_user_opted_in
 from bot.config import BASE_DIR
+from bot.data import FREAKY_GIFS
+from bot.settings_ui import open_settings
 
 
 # Registers all slash commands with the Discord command tree.
@@ -17,7 +21,9 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
 
     @tree.command(name="freaky", description="does something freaky")
     async def freaky(interaction: discord.Interaction) -> None:
-        await interaction.response.send_message("😛😛😛lul")
+        # Falls back to the old text reply until FREAKY_GIFS has links in it
+        message = random.choice(FREAKY_GIFS) if FREAKY_GIFS else "whoops something broke, go @brax"
+        await interaction.response.send_message(message)
 
     roast = app_commands.Group(name="roast", description="Roast related commands")
     riot = app_commands.Group(name="riot", description="Riot/League related commands")
@@ -96,26 +102,21 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
 
         await interaction.followup.send(embed=embed)
 
-    # Adds the current channel to the bot's allowed list so it can send messages and reactions there.
-    @channel.command(name="set", description="Sets the channel in which the bot is allowed to message, react, etc.")
-    async def set_channel(interaction: discord.Interaction) -> None:
-        add_allowed_channel(str(interaction.channel_id), str(interaction.guild_id))
-        await interaction.response.send_message(f"✅ Lolroaster will now react (roast) users in <#{interaction.channel_id}>")
-
-    # Removes the current channel from the bot's allowed list.
-    @channel.command(name="remove", description="Removes an allowed channel")
-    async def removed_allowed_channel(interaction: discord.Interaction) -> None:
-        remove_allowed_channel(str(interaction.channel_id))
-        await interaction.response.send_message(f"😶‍🌫️ Lolroaster will no longer yap in <#{interaction.channel_id}>")
-
     # Lists all channels in the server that the bot is currently allowed to operate in.
     @channel.command(name="list", description="List all allowed channels in a server")
     async def list_channels(interaction: discord.Interaction) -> None:
         channels = get_allowed_channels(str(interaction.guild_id))
         if not channels:
-            return interaction.response.send_message("There are no channels currently set, please use /channel set to add a channel!")
+            return await interaction.response.send_message("There are no channels currently set, use /settings to choose some!")
         channel_mentions = "\n".join([f"<#{cid}>" for cid in channels])
         await interaction.response.send_message(f"Allowed channels:{channel_mentions}")
+
+    # Admin-only: walks through turning the bot on/off for the server and choosing its channels.
+    @tree.command(name="settings", description="(Admin) Turn the bot on/off for this server and choose its channels")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(manage_guild=True)
+    async def settings(interaction: discord.Interaction) -> None:
+        await open_settings(interaction)
 
     # Toggles the calling user's opt-in status for bot interactions (roasts, leaderboard, etc.).
     # Responds ephemerally so only the user sees the confirmation.
