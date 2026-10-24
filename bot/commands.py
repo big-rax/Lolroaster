@@ -7,7 +7,8 @@ from discord import app_commands
 from pyke import Continent, Pyke, exceptions, DataDragon
 from bot.riot_api import get_account_info, get_champion_mastery, get_all_ranks, rank_sort_key, get_live_game, get_match_result, get_champion_name_map, get_latest_patch, build_mastery_banner
 from bot.store import save_link, get_allowed_channels, get_link, toggle_user_opt_in, get_all_links, is_user_opted_in
-from bot.config import BASE_DIR
+from bot.config import BASE_DIR, WORDLE_BOT_ID
+from bot.wordle import is_wordle_summary, wordle_number_for, wordle_date, build_wordle_roasts
 from bot.data import FREAKY_GIFS
 from bot.settings_ui import open_settings
 
@@ -27,7 +28,17 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
 
     roast = app_commands.Group(name="roast", description="Roast related commands")
     riot = app_commands.Group(name="riot", description="Riot/League related commands")
-    channel = app_commands.Group(name="channel", description="Channel management commands")
+    # Explicit False is needed: guild_only alone leaves DMs/group chats unset, which inherit the tree's default of allowed
+    SERVER_ONLY = app_commands.AppCommandContext(guild=True, dm_channel=False, private_channel=False)
+    channel = app_commands.Group(name="channel", description="Channel management commands", allowed_contexts=SERVER_ONLY)
+
+    # Subcommands can't be restricted to servers on their own, so server-dependent ones check this at runtime.
+    # interaction.guild is only set when the bot itself is in the server (not for user installs elsewhere).
+    async def _require_bot_guild(interaction: discord.Interaction) -> bool:
+        if interaction.guild is not None:
+            return True
+        await interaction.response.send_message("This command only works in a server I've been added to.", ephemeral=True)
+        return False
 
     #@tree.command(name"Track", description="Tracks a user")
     # Looks up a Riot account by game name and tag line, saves the link to the calling user's
@@ -113,7 +124,7 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
 
     # Admin-only: walks through turning the bot on/off for the server and choosing its channels.
     @tree.command(name="settings", description="(Admin) Turn the bot on/off for this server and choose its channels")
-    @app_commands.guild_only()
+    @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=False)
     @app_commands.default_permissions(manage_guild=True)
     async def settings(interaction: discord.Interaction) -> None:
         await open_settings(interaction)
@@ -132,6 +143,8 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
     # Blocked for non-admins. Responds ephemerally so only the admin sees the confirmation.
     @roast.command(name="toggle-user", description="(Admin) Toggle opt-in status for a specific user")
     async def toggle_user(interaction: discord.Interaction, user: discord.Member) -> None:
+        if not await _require_bot_guild(interaction):
+            return
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
             return
@@ -201,6 +214,7 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
         return embed
 
     active_live_views: dict[str, "LiveGameView"] = {}
+    LIVE_EDIT_WINDOW = 13 * 60  # stay safely inside the 15-minute interaction token lifetime
 
     class LiveGameView(discord.ui.View):
         def __init__(self, linked: dict):
@@ -210,6 +224,9 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
             self._poll_task: asyncio.Task | None = None
             self.game_id: int | None = None
             self.patch: str = "15.1.1"
+            # Outside servers the bot is in, the message can only be edited through the interaction
+            # token, which expires after 15 minutes. None means no limit.
+            self.edit_deadline: float | None = None
 
             name_tag = f"{linked['game_name']}-{linked['tag_line']}".replace(" ", "%20")
             self.add_item(discord.ui.Button(
@@ -226,6 +243,14 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
             while True:
                 await asyncio.sleep(60)
                 if self.message is None:
+                    break
+                if self.edit_deadline is not None and time.monotonic() > self.edit_deadline:
+                    embed = self.message.embeds[0] if self.message.embeds else discord.Embed()
+                    embed.set_footer(text="Auto-updates paused (Discord's 15 min limit outside servers). Press Refresh to resume.")
+                    try:
+                        await self.message.edit(embed=embed, view=self)
+                    except (discord.NotFound, discord.HTTPException):
+                        pass
                     break
                 game = await get_live_game(api, self.linked["puuid"])
                 if game is None:
@@ -286,12 +311,12 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
                     except (discord.NotFound, discord.HTTPException):
                         break
 
-        async def disable(self) -> None:
+        async def disable(self, delete: bool = True) -> None:
             if self._poll_task and not self._poll_task.done():
                 self._poll_task.cancel()
             discord.ui.View.stop(self)
             active_live_views.pop(self.linked["puuid"], None)
-            if self.message:
+            if delete and self.message:
                 try:
                     await self.message.delete()
                 except (discord.NotFound, discord.HTTPException):
@@ -302,17 +327,26 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
             await interaction.response.defer()
             game = await get_live_game(api, self.linked["puuid"])
             if game is None:
-                await self.disable()
+                await self.disable(delete=False)
+                await interaction.delete_original_response()
                 await interaction.followup.send("Game has ended.", ephemeral=True)
                 return
             champ_map = await get_champion_name_map()
             embed = build_live_embed(game, self.linked, champ_map, self.patch)
             await interaction.edit_original_response(embed=embed, view=self)
+            if self.edit_deadline is not None:
+                # The button press gives a fresh token, so hand it to the poller for another 15 minutes
+                self.message = await interaction.original_response()
+                self.edit_deadline = time.monotonic() + LIVE_EDIT_WINDOW
+                if self._poll_task is None or self._poll_task.done():
+                    self.start_polling()
 
         @discord.ui.button(label="Stop Watching", emoji="⛔", style=discord.ButtonStyle.danger)
         async def stop_watching(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-            await interaction.response.defer(ephemeral=True)
-            await self.disable()
+            await interaction.response.defer()
+            await self.disable(delete=False)
+            # Deleting through this interaction works even where the bot can't access the channel
+            await interaction.delete_original_response()
 
     async def _start_live_tracking(interaction: discord.Interaction, target: discord.Member) -> None:
         linked = get_link(str(target.id))
@@ -336,7 +370,12 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
         view = LiveGameView(linked)
         view.patch = patch
         active_live_views[linked["puuid"]] = view
-        view.message = await interaction.channel.send(embed=embed, view=view)
+        if interaction.guild is not None:
+            view.message = await interaction.channel.send(embed=embed, view=view)
+        else:
+            # DMs, group chats, or servers the bot isn't in: the bot can't post to the channel directly
+            view.message = await interaction.followup.send(embed=embed, view=view, wait=True)
+            view.edit_deadline = time.monotonic() + LIVE_EDIT_WINDOW
         view.start_polling()
 
     class LiveUserSelectView(discord.ui.View):
@@ -400,7 +439,7 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
         embed.add_field(name="KDA", value=f"{result['kills']}/{result['deaths']}/{result['assists']}", inline=True)
         mins, secs = divmod(result["gameDuration"], 60)
         embed.add_field(name="Duration", value=f"{mins}m {secs}s", inline=True)
-        await interaction.channel.send(embed=embed)
+        await interaction.followup.send(embed=embed)
 
     class LastGameUserSelectView(discord.ui.View):
         def __init__(self):
@@ -434,6 +473,59 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
     @roast.command(name="lastgame", description="Show the last game you or another player played")
     async def lastgame(interaction: discord.Interaction) -> None:
         await interaction.response.send_message("Whose last game?", view=LastGameModeView(), ephemeral=True)
+
+    WORDLE_SEARCH_LIMIT = 200
+
+    # Returns the Wordle bot's group summaries in this channel, newest first.
+    async def _find_wordle_summaries(channel: discord.abc.Messageable) -> list[discord.Message]:
+        summaries = []
+        try:
+            async for message in channel.history(limit=WORDLE_SEARCH_LIMIT):
+                if message.author.id == WORDLE_BOT_ID and is_wordle_summary(message.content):
+                    summaries.append(message)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+        return summaries
+
+    # Re-runs the Wordle roast on a past group summary in this channel. Defaults to the most recent one.
+    @roast.command(name="wordle", description="Roast the players from a Wordle result")
+    @app_commands.describe(number="Wordle number (defaults to the most recent result)")
+    async def roast_wordle(interaction: discord.Interaction, number: int | None = None) -> None:
+        if not await _require_bot_guild(interaction):
+            return
+        await interaction.response.defer()
+
+        summaries = await _find_wordle_summaries(interaction.channel)
+        if number is not None:
+            summaries = [m for m in summaries if wordle_number_for(m) == number]
+        if not summaries:
+            which = f"Wordle No. {number}" if number is not None else "a Wordle result"
+            await interaction.followup.send(
+                f"Couldn't find {which} in the last {WORDLE_SEARCH_LIMIT} messages here.", ephemeral=True
+            )
+            return
+
+        summary = summaries[0]
+        roasts = build_wordle_roasts(summary.content)
+        if not roasts:
+            await interaction.followup.send("Nobody in that result is opted in to roasts.", ephemeral=True)
+            return
+
+        header = f"**Wordle No. {wordle_number_for(summary)}** ({summary.jump_url})"
+        await interaction.followup.send("\n".join([header, *roasts]))
+
+    @roast_wordle.autocomplete("number")
+    async def roast_wordle_number_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[int]]:
+        if interaction.guild is None:
+            return []
+        choices = []
+        for message in await _find_wordle_summaries(interaction.channel):
+            n = wordle_number_for(message)
+            if current and not str(n).startswith(current):
+                continue
+            d = wordle_date(n)
+            choices.append(app_commands.Choice(name=f"No. {n} ({d:%b} {d.day})", value=n))
+        return choices[:25]
 
     # Displays the calling user's currently linked Riot account and their Solo/Duo and Flex ranks.
     # Uses Components V2 layout with a container, section header, rank blocks, and footer.
@@ -525,6 +617,8 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
     # Embed color reflects the highest-ranked Solo/Duo player's tier.
     @riot.command(name="leaderboard", description="Shows the server's ranked leaderboard")
     async def leaderboard(interaction: discord.Interaction) -> None:
+        if not await _require_bot_guild(interaction):
+            return
         try:
             await interaction.response.defer()
         except discord.NotFound:

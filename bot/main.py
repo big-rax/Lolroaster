@@ -15,7 +15,12 @@ def build_client(api, ddragon) -> tuple[discord.Client, discord.app_commands.Com
     intents.members = True
 
     client = discord.Client(intents=intents)
-    tree = discord.app_commands.CommandTree(client)
+    # Commands work in servers and, for users who install the app to their account, in DMs and group chats
+    tree = discord.app_commands.CommandTree(
+        client,
+        allowed_installs=discord.app_commands.AppInstallationType(guild=True, user=True),
+        allowed_contexts=discord.app_commands.AppCommandContext(guild=True, dm_channel=True, private_channel=True),
+    )
 
     register_commands(tree, api, ddragon)
     register_events(client, tree)

@@ -4,3 +4,4 @@ aiohttp
 Pillow
 pyke-lol
 psycopg[binary]
+tzdata
