@@ -6,9 +6,14 @@ import discord
 from discord import app_commands
 from pyke import Continent, Pyke, exceptions, DataDragon
 from bot.riot_api import get_account_info, get_champion_mastery, get_all_ranks, rank_sort_key, get_live_game, get_match_result, get_champion_name_map, get_latest_patch, build_mastery_banner
-from bot.store import save_link, get_allowed_channels, get_link, toggle_user_opt_in, get_all_links, is_user_opted_in
+from bot.store import save_link, get_allowed_channels, get_link, toggle_user_opt_in, get_all_links, is_user_opted_in, save_steam_link, delete_steam_link, set_ping_channel
+from bot.steam import resolve_steam_id, get_profile, get_owned_games
 from bot.config import BASE_DIR, WORDLE_BOT_ID
 from bot.wordle import is_wordle_summary, wordle_number_for, wordle_date, build_wordle_roasts
+from bot.activities import (
+    MAX_GAME_NAME, MAX_GAMES_PER_SERVER, MAX_MESSAGE,
+    add_game, added_games, is_default, remove_game, resolve_game_name, suggest_game_names, tracked_games,
+)
 from bot.data import FREAKY_GIFS
 from bot.settings_ui import open_settings
 
@@ -527,6 +532,108 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
             choices.append(app_commands.Choice(name=f"No. {n} ({d:%b} {d.day})", value=n))
         return choices[:25]
 
+    game = app_commands.Group(name="game", description="Choose which games get people roasted", parent=roast)
+
+    # Adds a game (any Discord activity) that pings opted-in players when they start it.
+    @game.command(name="add", description="Roast people when they start playing a game")
+    @app_commands.describe(
+        name="The game's name exactly as Discord shows it (suggestions are what people are playing now)",
+        message="(Optional) What to say after the @mention, e.g. \"is coding 🤓\" ",
+    )
+    async def game_add(
+        interaction: discord.Interaction,
+        name: app_commands.Range[str, 1, MAX_GAME_NAME],
+        message: app_commands.Range[str, 1, MAX_MESSAGE] | None = None,
+    ) -> None:
+        if not await _require_bot_guild(interaction):
+            return
+        resolved = resolve_game_name(interaction.guild, name)
+        if resolved is None:
+            await interaction.response.send_message(
+                f"Discord doesn't recognize **{name.strip()}** as a game, and nobody here has played it. "
+                "Pick one from the suggestions.",
+                ephemeral=True,
+            )
+            return
+        name = resolved
+        if name.lower() in tracked_games(interaction.guild_id):
+            await interaction.response.send_message(f"**{name}** is already being tracked.", ephemeral=True)
+            return
+        if len(added_games(interaction.guild_id)) >= MAX_GAMES_PER_SERVER:
+            await interaction.response.send_message(
+                f"This server already tracks {MAX_GAMES_PER_SERVER} games. Remove one first.", ephemeral=True
+            )
+            return
+        if not add_game(interaction.guild_id, name, message, interaction.user.id):
+            await interaction.response.send_message(f"**{name}** is already being tracked.", ephemeral=True)
+            return
+        preview = f"{interaction.user.mention} {tracked_games(interaction.guild_id)[name.lower()][1]}"
+        await interaction.response.send_message(
+            f"Now tracking **{name}**. Opted-in players will get: {preview}",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @game_add.autocomplete("name")
+    async def game_add_name_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+        if interaction.guild is None:
+            return []
+        names = suggest_game_names(interaction.guild, current, exclude=set(tracked_games(interaction.guild.id)))
+        return [app_commands.Choice(name=n, value=n) for n in names if len(n) <= MAX_GAME_NAME]
+
+    @game.command(name="remove", description="Stop roasting people for a game")
+    @app_commands.describe(name="A game added with /roast game add")
+    async def game_remove(interaction: discord.Interaction, name: str) -> None:
+        if not await _require_bot_guild(interaction):
+            return
+        if is_default(name):
+            await interaction.response.send_message(f"**{name}** is a default game and can't be removed.", ephemeral=True)
+            return
+        display = added_games(interaction.guild_id).get(name.lower(), (name, None))[0]
+        if not remove_game(interaction.guild_id, name):
+            await interaction.response.send_message(f"**{name}** isn't being tracked.", ephemeral=True)
+            return
+        await interaction.response.send_message(f"Stopped tracking **{display}**.")
+
+    @game_remove.autocomplete("name")
+    async def game_remove_name_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+        if interaction.guild_id is None:
+            return []
+        names = sorted(name for name, _ in added_games(interaction.guild_id).values() if current.lower() in name.lower())
+        return [app_commands.Choice(name=n, value=n) for n in names[:25]]
+
+    @game.command(name="list", description="Show which games get people roasted")
+    async def game_list(interaction: discord.Interaction) -> None:
+        if not await _require_bot_guild(interaction):
+            return
+        lines = []
+        for name, message in tracked_games(interaction.guild_id).values():
+            tag = " (default)" if is_default(name) else ""
+            lines.append(f"• **{name}**{tag}: @player {message}")
+        embed = discord.Embed(title="🎮 Tracked games", description="\n".join(lines), color=discord.Color.blurple())
+        embed.set_footer(text="Only opted-in players are pinged. Add more with /roast game add")
+        await interaction.response.send_message(embed=embed)
+
+    # Admin-only: picks the channel game pings go to. Leaving the channel out goes back to the default.
+    @game.command(name="channel", description="(Admin) Choose the channel game pings are posted in")
+    @app_commands.describe(channel="Where to post game pings. Leave empty to go back to the default")
+    async def game_channel(interaction: discord.Interaction, channel: discord.TextChannel | None = None) -> None:
+        if not await _require_bot_guild(interaction):
+            return
+        if not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message("You need the Manage Server permission to change this.", ephemeral=True)
+            return
+        if channel is None:
+            set_ping_channel(str(interaction.guild_id), None)
+            await interaction.response.send_message(
+                "Game pings will go to the default channel again (the first allowed channel from /settings)."
+            )
+            return
+        if not channel.permissions_for(interaction.guild.me).send_messages:
+            await interaction.response.send_message(f"I can't send messages in {channel.mention}.", ephemeral=True)
+            return
+        set_ping_channel(str(interaction.guild_id), str(channel.id))
+        await interaction.response.send_message(f"Game pings will now be posted in {channel.mention}.")
+
     # Displays the calling user's currently linked Riot account and their Solo/Duo and Flex ranks.
     # Uses Components V2 layout with a container, section header, rank blocks, and footer.
     # Notifies the user if they haven't linked an account yet.
@@ -722,6 +829,50 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
             except Exception:
                 pass
 
+    steam = app_commands.Group(name="steam", description="Steam related commands")
+
+    # Links a Steam account so game pings can use real playtime (hours in the last 2 weeks).
+    @steam.command(name="link", description="Link your Steam account so playtime roasts are accurate")
+    @app_commands.describe(profile="Your Steam profile link, custom URL name, or SteamID64")
+    async def steam_link(interaction: discord.Interaction, profile: app_commands.Range[str, 1, 200]) -> None:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            steam_id = await resolve_steam_id(profile)
+            info = await get_profile(steam_id) if steam_id else None
+        except Exception as e:
+            print(f"Steam lookup failed: {e!r}", flush=True)
+            await interaction.followup.send("Couldn't reach Steam right now. Try again in a bit.", ephemeral=True)
+            return
+        if info is None:
+            await interaction.followup.send(
+                "Couldn't find that Steam account. Paste your profile link, "
+                "e.g. `https://steamcommunity.com/id/yourname`.",
+                ephemeral=True,
+            )
+            return
+
+        save_steam_link(str(interaction.user.id), steam_id)
+        try:
+            games = await get_owned_games(steam_id)
+        except Exception:
+            games = {}
+        if games:
+            note = f"I can see {len(games)} games, so game pings will use your real playtime."
+        else:
+            note = (
+                "Your game details are private, so I can't see your playtime yet. In Steam, go to "
+                "Edit Profile → Privacy Settings and set **Game details** to Public."
+            )
+        await interaction.followup.send(f"Linked to Steam account **{info['name']}**. {note}", ephemeral=True)
+
+    @steam.command(name="unlink", description="Unlink your Steam account")
+    async def steam_unlink(interaction: discord.Interaction) -> None:
+        if delete_steam_link(str(interaction.user.id)):
+            await interaction.response.send_message("Unlinked your Steam account.", ephemeral=True)
+        else:
+            await interaction.response.send_message("You don't have a Steam account linked.", ephemeral=True)
+
     tree.add_command(roast)
     tree.add_command(riot)
     tree.add_command(channel)
+    tree.add_command(steam)

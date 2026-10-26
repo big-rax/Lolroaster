@@ -1,4 +1,5 @@
 from __future__ import annotations
+from datetime import datetime
 import os
 import psycopg
 from . import config  # noqa: F401  (loads .env so DATABASE_URL is set)
@@ -59,6 +60,44 @@ def init_db() -> None:
             mode TEXT NOT NULL DEFAULT 'specific' CHECK (mode IN ('all', 'specific'))
         )
     """)
+    # Where game pings go (/roast game channel). NULL means the default: the first allowed channel.
+    _execute("ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS ping_channel_id TEXT")
+    # Extra activities a server added with /roast game, on top of the built-in defaults.
+    # message is the text after the mention; NULL means use the generic message.
+    _execute("""
+        CREATE TABLE IF NOT EXISTS tracked_games (
+            guild_id TEXT NOT NULL,
+            game_name TEXT NOT NULL,
+            message TEXT,
+            added_by TEXT NOT NULL
+        )
+    """)
+    _execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS tracked_games_guild_name
+        ON tracked_games (guild_id, lower(game_name))
+    """)
+    _execute("""
+        CREATE TABLE IF NOT EXISTS steam_links (
+            discord_id TEXT PRIMARY KEY,
+            steam_id TEXT NOT NULL
+        )
+    """)
+    # Play sessions recorded from Discord presence. ended_at is NULL while the session is open;
+    # last_seen is refreshed periodically so sessions left open by a crash can be closed sensibly.
+    _execute("""
+        CREATE TABLE IF NOT EXISTS game_sessions (
+            id BIGSERIAL PRIMARY KEY,
+            discord_id TEXT NOT NULL,
+            game_name TEXT NOT NULL,
+            started_at TIMESTAMPTZ NOT NULL,
+            ended_at TIMESTAMPTZ,
+            last_seen TIMESTAMPTZ NOT NULL
+        )
+    """)
+    _execute("""
+        CREATE INDEX IF NOT EXISTS game_sessions_user_game
+        ON game_sessions (discord_id, lower(game_name), started_at)
+    """)
 
 # Saves a server's bot settings. mode is ignored by the bot while enabled is False.
 def set_guild_settings(guild_id: str, enabled: bool, mode: str = "specific") -> None:
@@ -70,14 +109,22 @@ def set_guild_settings(guild_id: str, enabled: bool, mode: str = "specific") -> 
             mode = excluded.mode
     """, (guild_id, enabled, mode))
 
-# Returns a server's settings as {"enabled": bool, "mode": str}, with defaults if none are saved.
+# Returns a server's settings as {"enabled": bool, "mode": str, "ping_channel_id": str | None},
+# with defaults if none are saved.
 def get_guild_settings(guild_id: str) -> dict:
     row = _execute(
-        "SELECT enabled, mode FROM guild_settings WHERE guild_id = %s", (guild_id,)
+        "SELECT enabled, mode, ping_channel_id FROM guild_settings WHERE guild_id = %s", (guild_id,)
     ).fetchone()
     if row:
-        return {"enabled": row[0], "mode": row[1]}
-    return {"enabled": True, "mode": "specific"}
+        return {"enabled": row[0], "mode": row[1], "ping_channel_id": row[2]}
+    return {"enabled": True, "mode": "specific", "ping_channel_id": None}
+
+# Sets (or with None, clears) the channel game pings are posted in. Leaves the other settings alone.
+def set_ping_channel(guild_id: str, channel_id: str | None) -> None:
+    _execute("""
+        INSERT INTO guild_settings (guild_id, ping_channel_id) VALUES (%s, %s)
+        ON CONFLICT (guild_id) DO UPDATE SET ping_channel_id = excluded.ping_channel_id
+    """, (guild_id, channel_id))
 
 # Replaces a server's allowed channel list with exactly the given channels.
 def set_allowed_channels(guild_id: str, channel_ids: list[str]) -> None:
@@ -166,3 +213,74 @@ def get_all_links() -> list[dict]:
         {"discord_id": r[0], "puuid": r[1], "game_name": r[2], "tag_line": r[3]}
         for r in rows
     ]
+
+# Adds a tracked game for a server. Returns False if the server already tracks it (any casing).
+def add_tracked_game(guild_id: str, game_name: str, message: str | None, added_by: str) -> bool:
+    return _execute("""
+        INSERT INTO tracked_games (guild_id, game_name, message, added_by)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (guild_id, lower(game_name)) DO NOTHING
+    """, (guild_id, game_name, message, added_by)).rowcount > 0
+
+# Removes a server's tracked game (any casing). Returns False if it wasn't tracked.
+def remove_tracked_game(guild_id: str, game_name: str) -> bool:
+    return _execute(
+        "DELETE FROM tracked_games WHERE guild_id = %s AND lower(game_name) = lower(%s)",
+        (guild_id, game_name)
+    ).rowcount > 0
+
+# Returns every server's added games as (guild_id, game_name, message) rows.
+def get_all_tracked_games() -> list[tuple[str, str, str | None]]:
+    return _execute("SELECT guild_id, game_name, message FROM tracked_games").fetchall()
+
+def save_steam_link(discord_id: str, steam_id: str) -> None:
+    _execute("""
+        INSERT INTO steam_links (discord_id, steam_id) VALUES (%s, %s)
+        ON CONFLICT (discord_id) DO UPDATE SET steam_id = excluded.steam_id
+    """, (discord_id, steam_id))
+
+def get_steam_link(discord_id: str) -> str | None:
+    row = _execute("SELECT steam_id FROM steam_links WHERE discord_id = %s", (discord_id,)).fetchone()
+    return row[0] if row else None
+
+# Returns False if the user had no linked Steam account.
+def delete_steam_link(discord_id: str) -> bool:
+    return _execute("DELETE FROM steam_links WHERE discord_id = %s", (discord_id,)).rowcount > 0
+
+# Opens a play session and returns its id. The start is moved up to the end of the user's previous
+# session for that game, so a session reopened after a restart doesn't count the same time twice.
+def open_game_session(discord_id: str, game_name: str, started_at: datetime) -> int:
+    return _execute("""
+        INSERT INTO game_sessions (discord_id, game_name, started_at, last_seen)
+        SELECT %s, %s, GREATEST(%s, COALESCE(MAX(ended_at), %s)), now()
+        FROM game_sessions WHERE discord_id = %s AND lower(game_name) = lower(%s)
+        RETURNING id
+    """, (discord_id, game_name, started_at, started_at, discord_id, game_name)).fetchone()[0]
+
+def close_game_session(session_id: int) -> None:
+    _execute(
+        "UPDATE game_sessions SET ended_at = now(), last_seen = now() WHERE id = %s AND ended_at IS NULL",
+        (session_id,)
+    )
+
+def touch_open_game_sessions() -> None:
+    _execute("UPDATE game_sessions SET last_seen = now() WHERE ended_at IS NULL")
+
+# Closes sessions left open when the bot stopped, at the last time they were confirmed.
+def close_stale_game_sessions() -> None:
+    _execute("UPDATE game_sessions SET ended_at = last_seen WHERE ended_at IS NULL")
+
+# Seconds a user played a game since `since`, counting only finished sessions (an open one is the
+# session that's just starting).
+def get_recorded_playtime(discord_id: str, game_name: str, since: datetime) -> float:
+    row = _execute("""
+        SELECT COALESCE(SUM(EXTRACT(EPOCH FROM ended_at - GREATEST(started_at, %s))), 0)
+        FROM game_sessions
+        WHERE discord_id = %s AND lower(game_name) = lower(%s)
+          AND ended_at IS NOT NULL AND ended_at > %s
+    """, (since, discord_id, game_name, since)).fetchone()
+    return float(row[0])
+
+# When session recording began (the earliest recorded session), or None if nothing is recorded yet.
+def get_recording_start() -> datetime | None:
+    return _execute("SELECT MIN(started_at) FROM game_sessions").fetchone()[0]
