@@ -4,3 +4,4 @@ riot_links.db
 .neon
 node_modules/
 .venv/
+.DS_Store
