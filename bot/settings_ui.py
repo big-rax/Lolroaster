@@ -175,8 +175,8 @@ def find_welcome_channel(guild: discord.Guild) -> discord.TextChannel | None:
     return None
 
 WELCOME_TEXT = (
-    "👋 **Thanks for adding Lolroaster!**\n"
-    "I'm staying quiet until an admin picks where I'm allowed to roast people. "
+    "🦧**Thanks for adding Lolroaster!**\n"
+    "I can't see any channels currently. "
     "Hit **Set up** to choose a starting channel (or none yet), or run `/settings` anytime."
 )
 

@@ -17,7 +17,9 @@ def build_client(api, ddragon) -> tuple[discord.Client, discord.app_commands.Com
     intents.members = True
     intents.presences = True  # privileged: also enable "Presence Intent" in the Developer Portal
 
-    client = discord.Client(intents=intents)
+    # Only user pings are allowed, so text echoed back from users can't trigger @everyone or role pings
+    allowed_mentions = discord.AllowedMentions(everyone=False, roles=False, users=True, replied_user=True)
+    client = discord.Client(intents=intents, allowed_mentions=allowed_mentions)
     # Commands work in servers and, for users who install the app to their account, in DMs and group chats
     tree = discord.app_commands.CommandTree(
         client,

@@ -55,7 +55,7 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
         info = await get_account_info(api, game_name, tag_line)
 
         if info is None:
-            await interaction.followup.send(f"Couldn't find Riot account for {game_name}#{tag_line}. or some other shit broke idk just ping Baboondini")
+            await interaction.followup.send(f"Couldn't find Riot account for {game_name}#{tag_line}. Reach out to brax, something broke.")
             return
 
         save_link(
@@ -144,20 +144,23 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
         else:
             await interaction.response.send_message("You will no longer be roasted... at least by me.", ephemeral=True)
 
-    # Admin-only: toggles opt-in status for any server member selected via a user picker.
-    # Blocked for non-admins. Responds ephemerally so only the admin sees the confirmation.
-    @roast.command(name="toggle-user", description="(Admin) Toggle opt-in status for a specific user")
+    # Admin-only: opts a server member out of bot interactions. Opt-in is global across servers,
+    # so admins can only opt people out; opting in stays the user's own choice via /roast toggle.
+    # Responds ephemerally so only the admin sees the confirmation.
+    @roast.command(name="toggle-user", description="(Admin) Opt a specific user out of Lolroaster interactions")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
     async def toggle_user(interaction: discord.Interaction, user: discord.Member) -> None:
         if not await _require_bot_guild(interaction):
             return
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
             return
-        opted_in = toggle_user_opt_in(str(user.id))
-        if opted_in:
-            await interaction.response.send_message(f"<@{user.id}> will now be opted in to all Lolroaster interactions.", ephemeral=True)
-        else:
-            await interaction.response.send_message(f"<@{user.id}> has been opted out.", ephemeral=True)
+        if not is_user_opted_in(str(user.id)):
+            await interaction.response.send_message(f"<@{user.id}> isn't opted in. Users opt in themselves with /roast toggle.", ephemeral=True)
+            return
+        toggle_user_opt_in(str(user.id))
+        await interaction.response.send_message(f"<@{user.id}> has been opted out.", ephemeral=True)
 
     QUEUE_NAMES = {
         420: "Ranked Solo/Duo", 440: "Ranked Flex", 450: "ARAM",
@@ -217,6 +220,14 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
         embed.timestamp = discord.utils.utcnow()
 
         return embed
+
+    # Returns True if the caller may post the target's games publicly: themselves always,
+    # anyone else only if that person has opted in. Tells the caller why when it's blocked.
+    async def _target_allowed(interaction: discord.Interaction, target: discord.Member) -> bool:
+        if target.id == interaction.user.id or is_user_opted_in(str(target.id)):
+            return True
+        await interaction.followup.send(f"{target.display_name} hasn't opted in to Lolroaster, so I can't show their games.", ephemeral=True)
+        return False
 
     active_live_views: dict[str, "LiveGameView"] = {}
     LIVE_EDIT_WINDOW = 13 * 60  # stay safely inside the 15-minute interaction token lifetime
@@ -354,6 +365,8 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
             await interaction.delete_original_response()
 
     async def _start_live_tracking(interaction: discord.Interaction, target: discord.Member) -> None:
+        if not await _target_allowed(interaction, target):
+            return
         linked = get_link(str(target.id))
         if linked is None:
             noun = "You haven't" if target.id == interaction.user.id else f"{target.display_name} hasn't"
@@ -418,6 +431,8 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
         await interaction.response.send_message("Who do you want to track?", view=LiveModeView(), ephemeral=True)
 
     async def _show_last_game(interaction: discord.Interaction, target: discord.Member) -> None:
+        if not await _target_allowed(interaction, target):
+            return
         linked = get_link(str(target.id))
         if linked is None:
             noun = "You haven't" if target.id == interaction.user.id else f"{target.display_name} hasn't"
@@ -713,10 +728,10 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
             layout.add_item(container)
             await interaction.followup.send(view=layout, files=files)
 
-        except Exception as e:
+        except Exception:
             import traceback
-            traceback.print_exc()
-            await interaction.followup.send(content=str(e))
+            traceback.print_exc()  # full details stay in the server logs, not the channel
+            await interaction.followup.send(content="Something went wrong loading your account.", ephemeral=True)
 
     # Builds and sends a leaderboard embed for all opted-in users who have linked Riot accounts.
     # Fetches Solo/Duo and Flex ranks for each user, sorts by rank, and displays them with

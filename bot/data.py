@@ -3,10 +3,6 @@ TRIGGERS = {
         "type": "reaction",
         "responses": ["🔥", "🗿", "🦧"],
     },
-    "chud": {
-        "type": "reply",
-        "responses": ["Billy's favorite word!"],
-    },
     "kfc": {
         "type": "reply",
         "responses": [
