@@ -5,7 +5,7 @@ import time
 import discord
 from discord import app_commands
 from pyke import Continent, Pyke, exceptions, DataDragon
-from bot.riot_api import get_account_info, get_champion_mastery, get_all_ranks, rank_sort_key, get_live_game, get_match_result, get_champion_name_map, get_latest_patch, build_mastery_banner
+from bot.riot_api import get_account_info, riot_error_message, clean_riot_id_part, get_champion_mastery, get_all_ranks, rank_sort_key, get_live_game, get_match_result, get_champion_name_map, get_latest_patch, build_mastery_banner
 from bot.store import save_link, get_allowed_channels, get_link, toggle_user_opt_in, get_all_links, is_user_opted_in, save_steam_link, delete_steam_link, set_ping_channel
 from bot.steam import resolve_steam_id, get_profile, get_owned_games
 from bot.config import BASE_DIR, WORDLE_BOT_ID
@@ -16,6 +16,7 @@ from bot.activities import (
 )
 from bot.data import FREAKY_GIFS
 from bot.settings_ui import open_settings
+from bot.help import register_help
 
 
 # Registers all slash commands with the Discord command tree.
@@ -32,7 +33,7 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
         await interaction.response.send_message(message)
 
     roast = app_commands.Group(name="roast", description="Roast related commands")
-    riot = app_commands.Group(name="riot", description="Riot/League related commands")
+    lol = app_commands.Group(name="lol", description="League of Legends: accounts, ranks and games")
     # Explicit False is needed: guild_only alone leaves DMs/group chats unset, which inherit the tree's default of allowed
     SERVER_ONLY = app_commands.AppCommandContext(guild=True, dm_channel=False, private_channel=False)
     channel = app_commands.Group(name="channel", description="Channel management commands", allowed_contexts=SERVER_ONLY)
@@ -48,14 +49,16 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
     #@tree.command(name"Track", description="Tracks a user")
     # Looks up a Riot account by game name and tag line, saves the link to the calling user's
     # Discord ID, and replies with an embed showing their level and Solo/Duo rank.
-    @riot.command(name="link", description="Links your Riot account")
+    @lol.command(name="link", description="Links your Riot account")
     async def riot_link(interaction: discord.Interaction, game_name: str, tag_line: str) -> None:
         await interaction.response.defer()
 
-        info = await get_account_info(api, game_name, tag_line)
-
-        if info is None:
-            await interaction.followup.send(f"Couldn't find Riot account for {game_name}#{tag_line}. Reach out to brax, something broke.")
+        try:
+            info = await get_account_info(api, game_name, tag_line)
+        except Exception as e:
+            print(f"Riot API ERROR: {e}", flush=True)
+            riot_id = f"{clean_riot_id_part(game_name)}#{clean_riot_id_part(tag_line)}"
+            await interaction.followup.send(riot_error_message(e, riot_id))
             return
 
         save_link(
@@ -93,13 +96,13 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
 
     # Fetches the top champion masteries for the calling user's linked Riot account
     # and displays them in an embed ordered by mastery points.
-    @riot.command(name="mastery", description="Displays your top champion masteries")
+    @lol.command(name="mastery", description="Displays your top champion masteries")
     async def league_mastery(interaction: discord.Interaction) -> None:
         await interaction.response.defer()
 
         linked = get_link(str(interaction.user.id))
         if linked is None:
-            await interaction.followup.send("You haven't linked a Riot account yet! Use /riot link first.")
+            await interaction.followup.send("You haven't linked a Riot account yet! Use /lol link first.")
             return
 
         masteries = await get_champion_mastery(api, ddragon, linked["puuid"])
@@ -345,7 +348,7 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
             if game is None:
                 await self.disable(delete=False)
                 await interaction.delete_original_response()
-                await interaction.followup.send("Game has ended.", ephemeral=True)
+                await interaction.followup.send("Game has ended.")
                 return
             champ_map = await get_champion_name_map()
             embed = build_live_embed(game, self.linked, champ_map, self.patch)
@@ -370,13 +373,13 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
         linked = get_link(str(target.id))
         if linked is None:
             noun = "You haven't" if target.id == interaction.user.id else f"{target.display_name} hasn't"
-            await interaction.followup.send(f"{noun} linked a Riot account yet.", ephemeral=True)
+            await interaction.followup.send(f"{noun} linked a Riot account yet.")
             return
 
         game = await get_live_game(api, linked["puuid"])
         if game is None:
             noun = "You're" if target.id == interaction.user.id else f"{target.display_name} is"
-            await interaction.followup.send(f"{noun} not currently in a game.", ephemeral=True)
+            await interaction.followup.send(f"{noun} not currently in a game.")
             return
 
         existing = active_live_views.pop(linked["puuid"], None)
@@ -397,8 +400,16 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
         view.start_polling()
 
     class LiveUserSelectView(discord.ui.View):
-        def __init__(self):
+        def __init__(self, owner_id: int):
             super().__init__(timeout=60)
+            self.owner_id = owner_id
+
+        # Only the person who ran /lol live can use this picker
+        async def interaction_check(self, interaction: discord.Interaction) -> bool:
+            if interaction.user.id == self.owner_id:
+                return True
+            await interaction.response.send_message("This isn't your menu. Run /lol live yourself.", ephemeral=True)
+            return False
 
         @discord.ui.select(cls=discord.ui.UserSelect, placeholder="Choose a player to track...")
         async def user_select(self, interaction: discord.Interaction, select: discord.ui.UserSelect) -> None:
@@ -407,8 +418,16 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
             await _start_live_tracking(interaction, target)
 
     class LiveModeView(discord.ui.View):
-        def __init__(self):
+        def __init__(self, owner_id: int):
             super().__init__(timeout=60)
+            self.owner_id = owner_id
+
+        # Only the person who ran /lol live can use this picker
+        async def interaction_check(self, interaction: discord.Interaction) -> bool:
+            if interaction.user.id == self.owner_id:
+                return True
+            await interaction.response.send_message("This isn't your menu. Run /lol live yourself.", ephemeral=True)
+            return False
 
         @discord.ui.select(
             placeholder="Who do you want to track?",
@@ -422,13 +441,13 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
                 await interaction.response.edit_message(content="Checking your game...", view=None)
                 await _start_live_tracking(interaction, interaction.user)
             else:
-                await interaction.response.edit_message(content="Select a player to track:", view=LiveUserSelectView())
+                await interaction.response.edit_message(content="Select a player to track:", view=LiveUserSelectView(self.owner_id))
 
-    # Shows an ephemeral prompt to choose between tracking yourself or another player.
+    # Shows a prompt to choose between tracking yourself or another player.
     # Auto-updates the public game embed every 60 seconds and detects when the game ends.
-    @roast.command(name="live", description="Track a live game — yours or another player's")
+    @lol.command(name="live", description="Track a live game — yours or another player's")
     async def live(interaction: discord.Interaction) -> None:
-        await interaction.response.send_message("Who do you want to track?", view=LiveModeView(), ephemeral=True)
+        await interaction.response.send_message("Who do you want to track?", view=LiveModeView(interaction.user.id))
 
     async def _show_last_game(interaction: discord.Interaction, target: discord.Member) -> None:
         if not await _target_allowed(interaction, target):
@@ -490,7 +509,7 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
                 await interaction.response.edit_message(content="Select a player:", view=LastGameUserSelectView())
 
     # Fetches and displays the most recent match for the selected player.
-    @roast.command(name="lastgame", description="Show the last game you or another player played")
+    @lol.command(name="lastgame", description="Show the last game you or another player played")
     async def lastgame(interaction: discord.Interaction) -> None:
         await interaction.response.send_message("Whose last game?", view=LastGameModeView(), ephemeral=True)
 
@@ -652,14 +671,14 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
     # Displays the calling user's currently linked Riot account and their Solo/Duo and Flex ranks.
     # Uses Components V2 layout with a container, section header, rank blocks, and footer.
     # Notifies the user if they haven't linked an account yet.
-    @riot.command(name="account", description="Displays your currently linked Riot account")
+    @lol.command(name="account", description="Displays your currently linked Riot account")
     async def account(interaction: discord.Interaction) -> None:
         try:
             await interaction.response.defer()
 
             linked = get_link(str(interaction.user.id))
             if linked is None:
-                await interaction.followup.send("You don't have a linked Riot account. Use /riot link to link one!")
+                await interaction.followup.send("You don't have a linked Riot account. Use /lol link to link one!")
                 return
 
             ranks, masteries, patch = await asyncio.gather(
@@ -737,7 +756,7 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
     # Fetches Solo/Duo and Flex ranks for each user, sorts by rank, and displays them with
     # tier/division emojis and LP. Ranked players are shown above a separator from unranked ones.
     # Embed color reflects the highest-ranked Solo/Duo player's tier.
-    @riot.command(name="leaderboard", description="Shows the server's ranked leaderboard")
+    @lol.command(name="leaderboard", description="Shows the server's ranked leaderboard")
     async def leaderboard(interaction: discord.Interaction) -> None:
         if not await _require_bot_guild(interaction):
             return
@@ -749,7 +768,7 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
         try:
             links = get_all_links()
             if not links:
-                await interaction.followup.send("No one has linked their account yet! Use /riot_link first.")
+                await interaction.followup.send("No one has linked their account yet! Use /lol link first.")
                 return
 
             TIER_EMOJI = {
@@ -887,7 +906,8 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
         else:
             await interaction.response.send_message("You don't have a Steam account linked.", ephemeral=True)
 
+    register_help(tree)
     tree.add_command(roast)
-    tree.add_command(riot)
+    tree.add_command(lol)
     tree.add_command(channel)
     tree.add_command(steam)

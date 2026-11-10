@@ -1,32 +1,54 @@
 from __future__ import annotations
 from io import BytesIO
+import unicodedata
 from PIL import Image
-from pyke import Continent, Region, Pyke, DataDragon
+from pyke import Continent, Region, Pyke, DataDragon, exceptions
 import aiohttp
 
-async def get_account_info(api: Pyke, game_name:str, tag_line:str) -> dict | None:
-    try:
-        account = await api.account.by_riot_id(Continent.AMERICAS, game_name, tag_line) #game_name is really the players in game username
-        summoner = await api.summoner.by_puuid(Region.NA, account["puuid"])
-        entries = await api.league.by_puuid(Region.NA, account["puuid"]) #summoner.id contains a lot of info about the summoner, such as level
-        
-        rank_info = None
-        for entry in entries:
-            if entry["queueType"] == "RANKED_SOLO_5x5":
-                rank_info = entry
-                break
-        
-        return {
-            "puuid" : account["puuid"],
-            "gameName": account["gameName"],
-            "tagLine": account["tagLine"],
-            "summonerLevel": summoner["summonerLevel"],
-            "rank": rank_info,
-        }
-    except Exception as e:
-        print(f"Riot API ERROR: {e}")
-        return None
-    
+# Strips invisible Unicode format characters (e.g. U+2069 bidi isolates, zero-width spaces) that
+# sneak in when Riot IDs are copied from the client or Discord, plus surrounding whitespace and a leading '#'.
+def clean_riot_id_part(text: str) -> str:
+    return "".join(c for c in text if unicodedata.category(c) != "Cf").strip().lstrip("#").strip()
+
+# Looks up a Riot account plus its NA summoner level and Solo/Duo rank.
+# Raises pyke's RiotAPIException on failure so the caller can tell the user what went wrong
+# (use riot_error_message to turn it into a reply).
+async def get_account_info(api: Pyke, game_name:str, tag_line:str) -> dict:
+    game_name, tag_line = clean_riot_id_part(game_name), clean_riot_id_part(tag_line)
+    account = await api.account.by_riot_id(Continent.AMERICAS, game_name, tag_line) #game_name is really the players in game username
+    summoner = await api.summoner.by_puuid(Region.NA, account["puuid"])
+    entries = await api.league.by_puuid(Region.NA, account["puuid"]) #summoner.id contains a lot of info about the summoner, such as level
+
+    rank_info = None
+    for entry in entries:
+        if entry["queueType"] == "RANKED_SOLO_5x5":
+            rank_info = entry
+            break
+
+    return {
+        "puuid" : account["puuid"],
+        "gameName": account["gameName"],
+        "tagLine": account["tagLine"],
+        "summonerLevel": summoner["summonerLevel"],
+        "rank": rank_info,
+    }
+
+# Turns an exception from a Riot API call into a message that says what actually went wrong.
+# riot_id is the "Name#TAG" the user asked about, used in the not-found message.
+def riot_error_message(e: Exception, riot_id: str) -> str:
+    code = e.error_code if isinstance(e, exceptions.RiotAPIException) else None
+    if code in (401, 403):
+        return "The bot's Riot API key is invalid or expired. Reach out to brax to renew it."
+    if code == 404:
+        return f"Couldn't find an NA League account for {riot_id}. Double-check the name and tag."
+    if code == 400:
+        return f"Riot rejected {riot_id} as a Riot ID. Check for typos."
+    if code == 429:
+        return "Riot is rate-limiting the bot right now. Try again in a minute."
+    if code is not None and (code == 408 or code >= 500):
+        return "Riot's servers aren't responding right now. Try again in a bit."
+    return "Something went wrong talking to Riot. Reach out to brax."
+
 async def get_champion_mastery(api: Pyke, ddragon: DataDragon, puuid: str) -> list | None:
     try:
         masteries = await api.champion_mastery.masteries_by_puuid(Region.NA, puuid)

@@ -6,21 +6,23 @@ Everything social is opt-in: the bot only reacts to, replies to, or shows the ga
 
 ## Features
 
-### Riot account commands
+New here? Run `/help` in Discord for a quick tour of every command.
+
+### League commands (`/lol`)
 
 | Command | What it does |
 | --- | --- |
-| `/riot link <game_name> <tag_line>` | Links your Riot ID and shows your level, Solo/Duo rank and a top-3 mastery banner |
-| `/riot account` | Shows your linked account with Solo/Duo and Flex ranks |
-| `/riot mastery` | Lists your top champion masteries |
-| `/riot leaderboard` | Ranks the server's opted-in players by Solo/Duo, then Flex |
+| `/lol link <game_name> <tag_line>` | Links your Riot ID and shows your level, Solo/Duo rank and a top-3 mastery banner |
+| `/lol account` | Shows your linked account with Solo/Duo and Flex ranks |
+| `/lol mastery` | Lists your top champion masteries |
+| `/lol leaderboard` | Ranks the server's opted-in players by Solo/Duo, then Flex |
+| `/lol live` | Posts a live-game card for you or an opted-in player, refreshes it every 60 seconds, and swaps in the final result (win/loss, KDA, duration) when the game ends |
+| `/lol lastgame` | Shows the result of the most recent game for you or an opted-in player |
 
-### Game commands
+### Roasts
 
 | Command | What it does |
 | --- | --- |
-| `/roast live` | Posts a live-game card for you or an opted-in player, refreshes it every 60 seconds, and swaps in the final result (win/loss, KDA, duration) when the game ends |
-| `/roast lastgame` | Shows the result of the most recent game for you or an opted-in player |
 | `/roast wordle` | Roasts the players from a Wordle group result |
 
 ### Game activity pings
