@@ -9,7 +9,7 @@ from .settings_ui import WelcomeView, DmSetupButton, DmSkipButton
 from .store import init_db
 from .activities import load_tracked_games, known_games_loop
 from .playtime import heartbeat_loop
-from .leaderboard import leaderboard_loop, LeaderboardPageButton
+from .leaderboard import leaderboard_loop, LeaderboardPageSelect
 
 
 def build_client(api, ddragon) -> tuple[discord.Client, discord.app_commands.CommandTree]:
@@ -32,7 +32,7 @@ def build_client(api, ddragon) -> tuple[discord.Client, discord.app_commands.Com
     register_events(client, tree)
     client.add_view(WelcomeView())  # keeps welcome-message buttons working after restarts
     client.add_dynamic_items(DmSetupButton, DmSkipButton)  # same for the DM version
-    client.add_dynamic_items(LeaderboardPageButton)  # leaderboard arrows, on old posts too
+    client.add_dynamic_items(LeaderboardPageSelect)  # leaderboard page dropdown, on old posts too
 
     return client, tree
 

@@ -37,6 +37,7 @@ CAPTIONS = {
     "jump": ["Whatever happened this week, are you ok?", "Relapse of the week."],
 }
 MEDALS = ["🥇", "🥈", "🥉"]
+OVERVIEW_TITLE = "🏆 Overview (top 3)"
 
 Interval = tuple[datetime, datetime]
 
@@ -199,11 +200,11 @@ def _counted_games(guild_id: int) -> set[str]:
 
 
 # Page 0 is the overview (top 3 of every stat), then each stat gets a page ranking everyone who played.
-# Returns (embed, page count) for the week starting on `monday`, or None if no opted-in member played
-# anything. A page past the end shows the last page, since stats nobody scored in are left out.
+# Returns (embed, every page's title) for the week starting on `monday`, or None if no opted-in member
+# played anything. A page past the end shows the last page, since stats nobody scored in are left out.
 def build_leaderboard(
     guild: discord.Guild, monday: date, so_far: bool = False, page: int = 0
-) -> tuple[discord.Embed, int] | None:
+) -> tuple[discord.Embed, list[str]] | None:
     settings = get_guild_settings(str(guild.id))
     tz = server_tz(settings)
     start, end = _week_bounds(monday, tz)
@@ -222,8 +223,8 @@ def build_leaderboard(
     covered = recording_start is not None and recording_start <= last_start
     last = summarize(rows, last_start, start, tz, now) if covered else None
     stats = [c for c in categories(this, last) if ranking(this, c, top_only=True)]
-    pages = 1 + len(stats)
-    page = max(0, min(page, pages - 1))
+    pages = [OVERVIEW_TITLE] + [c.title for c in stats]
+    page = max(0, min(page, len(pages) - 1))
 
     sunday = monday + timedelta(days=6)
     dates = f"{monday:%b} {monday.day} to {sunday:%b} {sunday.day} ({tz.key} time)"
@@ -250,47 +251,47 @@ def build_leaderboard(
     return embed, pages
 
 
-# An arrow that flips the leaderboard to `page`. The week, page and mode live in the custom_id, so arrows
-# on old posts keep working after a restart; main.py registers this with client.add_dynamic_items().
-class LeaderboardPageButton(
-    discord.ui.DynamicItem[discord.ui.Button],
-    template=r"lolroaster:lb:(?P<monday>\d{8}):(?P<page>\d+):(?P<mode>[tw]):(?P<arrow>[lr])",
+# A dropdown of the leaderboard's pages, named after what each shows. The week and mode live in the
+# custom_id, so dropdowns on old posts keep working after a restart; main.py registers this with
+# client.add_dynamic_items().
+class LeaderboardPageSelect(
+    discord.ui.DynamicItem[discord.ui.Select],
+    template=r"lolroaster:lbpage:(?P<monday>\d{8}):(?P<mode>[tw])",
 ):
-    def __init__(self, monday: date, page: int, so_far: bool, arrow: str, disabled: bool = False):
-        super().__init__(discord.ui.Button(
-            emoji="◀️" if arrow == "l" else "▶️", style=discord.ButtonStyle.secondary, disabled=disabled,
-            custom_id=f"lolroaster:lb:{monday:%Y%m%d}:{page}:{'t' if so_far else 'w'}:{arrow}",
+    def __init__(self, monday: date, so_far: bool, pages: list[str] = (), current: int = 0):
+        options = []
+        for i, title in enumerate(pages):
+            emoji, label = title.split(" ", 1)  # titles start with their emoji, e.g. "⏱️ Most hours played"
+            options.append(discord.SelectOption(label=label, value=str(i), emoji=emoji, default=i == current))
+        super().__init__(discord.ui.Select(
+            placeholder="Jump to a stat...", options=options or [discord.SelectOption(label="Overview", value="0")],
+            custom_id=f"lolroaster:lbpage:{monday:%Y%m%d}:{'t' if so_far else 'w'}",
         ))
-        self.monday, self.page, self.so_far = monday, page, so_far
+        self.monday, self.so_far = monday, so_far
 
     @classmethod
     async def from_custom_id(
-        cls, interaction: discord.Interaction, item: discord.ui.Button, match
-    ) -> LeaderboardPageButton:
-        monday = datetime.strptime(match["monday"], "%Y%m%d").date()
-        return cls(monday, int(match["page"]), match["mode"] == "t", match["arrow"])
+        cls, interaction: discord.Interaction, item: discord.ui.Select, match
+    ) -> LeaderboardPageSelect:
+        # The options don't matter here: the callback reads the pick and sends a fresh dropdown
+        return cls(datetime.strptime(match["monday"], "%Y%m%d").date(), match["mode"] == "t")
 
     async def callback(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
             return
-        result = build_leaderboard(interaction.guild, self.monday, self.so_far, self.page)
+        page = int(interaction.data["values"][0])
+        result = build_leaderboard(interaction.guild, self.monday, self.so_far, page)
         if result is None:
             await interaction.response.send_message("There's nothing on this leaderboard anymore.", ephemeral=True)
             return
         embed, pages = result
-        page = max(0, min(self.page, pages - 1))
+        page = max(0, min(page, len(pages) - 1))
         await interaction.response.edit_message(embed=embed, view=leaderboard_view(self.monday, self.so_far, page, pages))
 
 
-# ◀️ page number ▶️ under a leaderboard. Each arrow is greyed out at its end.
-def leaderboard_view(monday: date, so_far: bool, page: int, pages: int) -> discord.ui.View:
+def leaderboard_view(monday: date, so_far: bool, page: int, pages: list[str]) -> discord.ui.View:
     view = discord.ui.View(timeout=None)
-    view.add_item(LeaderboardPageButton(monday, max(page - 1, 0), so_far, "l", disabled=page == 0))
-    view.add_item(discord.ui.Button(
-        label=f"{page + 1}/{pages}", style=discord.ButtonStyle.secondary, disabled=True,
-        custom_id="lolroaster:lb:indicator",
-    ))
-    view.add_item(LeaderboardPageButton(monday, min(page + 1, pages - 1), so_far, "r", disabled=page >= pages - 1))
+    view.add_item(LeaderboardPageSelect(monday, so_far, pages, page))
     return view
 
 
