@@ -51,6 +51,12 @@ def init_db() -> None:
             discord_id TEXT PRIMARY KEY
         )
     """)
+    # Users who want game pings to @mention them. Everyone else is named without a notification.
+    _execute("""
+        CREATE TABLE IF NOT EXISTS ping_mention_users (
+            discord_id TEXT PRIMARY KEY
+        )
+    """)
     # Per-server bot switch. mode is 'all' (every channel) or 'specific' (allowed_channels only).
     # Servers without a row behave as enabled + 'specific', matching the original behavior.
     _execute("""
@@ -284,3 +290,13 @@ def get_recorded_playtime(discord_id: str, game_name: str, since: datetime) -> f
 # When session recording began (the earliest recorded session), or None if nothing is recorded yet.
 def get_recording_start() -> datetime | None:
     return _execute("SELECT MIN(started_at) FROM game_sessions").fetchone()[0]
+
+# Flips whether game pings @mention this user. Returns True if they're now mentioned.
+def toggle_ping_mentions(discord_id: str) -> bool:
+    if _execute("DELETE FROM ping_mention_users WHERE discord_id = %s", (discord_id,)).rowcount:
+        return False
+    _execute("INSERT INTO ping_mention_users (discord_id) VALUES (%s) ON CONFLICT DO NOTHING", (discord_id,))
+    return True
+
+def wants_ping_mentions(discord_id: str) -> bool:
+    return _execute("SELECT 1 FROM ping_mention_users WHERE discord_id = %s", (discord_id,)).fetchone() is not None

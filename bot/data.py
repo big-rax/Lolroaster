@@ -24,7 +24,9 @@ FREAKY_GIFS = [
     "https://klipy.com/gifs/sonic-69",
     "https://klipy.com/gifs/gato-cat-58",
     "https://klipy.com/gifs/3-gato",
-    "https://klipy.com/gifs/paulaliensmirk"
+    "https://klipy.com/gifs/paulaliensmirk",
+    "https://klipy.com/gifs/rage-baited-diemarchive",
+    "https://klipy.com/gifs/lick-suck-2"
 ]
 
 WORDLE_RESPONSES = {

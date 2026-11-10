@@ -1,3 +1,4 @@
+import asyncio
 import random
 import time
 
@@ -6,10 +7,10 @@ import discord
 from .config import WORDLE_BOT_ID
 from .triggers import handle_trigger_message
 from .wordle import handle_wordle_message
-from .store import is_bot_active, is_user_opted_in, get_guild_settings, get_allowed_channels
+from .store import is_bot_active, is_user_opted_in, get_guild_settings, get_allowed_channels, wants_ping_mentions
 from .settings_ui import WelcomeView, WELCOME_TEXT, find_welcome_channel, send_setup_dm
 from .activities import record_seen_activities, tracked_activities, tracked_games
-from .deadlock import deadlock_updates, seed_deadlock_state
+from .deadlock import PartyEvent, deadlock_updates, group_message, party_message, seed_deadlock_state
 from .playtime import playtime_message, record_sessions, resume_sessions
 
 ACTIVITY_PING_COOLDOWN = 3 * 60 * 60  # seconds between pings per person, per activity, per server
@@ -34,6 +35,70 @@ def find_announce_channel(guild: discord.Guild) -> discord.TextChannel | None:
         if isinstance(channel, discord.TextChannel) and channel.permissions_for(guild.me).send_messages:
             return channel
     return None
+
+
+# Posts "@player <text>". The mention always shows as a clickable @name, but only notifies players who
+# turned that on with /roast game mentions. Messages can be user-written, so nobody else is ever pinged.
+async def send_game_ping(channel: discord.TextChannel, member: discord.Member, text: str) -> None:
+    await send_ping(channel, f"{member.mention} {text}", [member])
+
+
+# Sends a message that @s the given members, notifying only the ones who turned mentions on.
+async def send_ping(channel: discord.TextChannel, content: str, members: list[discord.Member]) -> None:
+    notify = [m for m in members if wants_ping_mentions(str(m.id))]
+    allowed = discord.AllowedMentions(everyone=False, roles=False, users=notify)
+    await channel.send(content, allowed_mentions=allowed)
+
+
+# Party members' presences change a few seconds apart, so Deadlock events for parties are held this long
+# and members of the same server who did the same thing with the same party size are posted together.
+PARTY_GROUP_WINDOW = 15
+# (guild_id, "queue" or "match", party size) -> {user_id: (member, event)} waiting to be posted.
+# Queue and requeue share a group, since one party member may have been tracked through the last match
+# and another not (e.g. they joined the server's tracking after a restart).
+_pending_parties: dict[tuple[int, str, int], dict[int, tuple[discord.Member, PartyEvent]]] = {}
+_party_tasks: set[asyncio.Task] = set()
+
+
+async def post_deadlock_event(member: discord.Member, event: PartyEvent) -> None:
+    if event.size <= 1:
+        await _post_deadlock([(member, event)], member.guild, event.event, event.size)
+        return
+    key = (member.guild.id, "match" if event.event == "match" else "queue", event.size)
+    if key not in _pending_parties:
+        _pending_parties[key] = {}
+        task = asyncio.create_task(_flush_party(key, member.guild))
+        _party_tasks.add(task)  # kept referenced until done so it isn't garbage collected
+        task.add_done_callback(_party_tasks.discard)
+    _pending_parties[key][member.id] = (member, event)
+
+
+async def _flush_party(key: tuple[int, str, int], guild: discord.Guild) -> None:
+    await asyncio.sleep(PARTY_GROUP_WINDOW)
+    group = list(_pending_parties.pop(key, {}).values())
+    # A single requeue in the group makes it a requeue message: someone's back right after a match
+    event = "requeue" if any(e.event == "requeue" for _, e in group) else key[1]
+    await _post_deadlock(group, guild, event, key[2])
+
+
+async def _post_deadlock(
+    group: list[tuple[discord.Member, PartyEvent]], guild: discord.Guild, event: str, size: int
+) -> None:
+    names = ", ".join(str(m) for m, _ in group)
+    channel = find_announce_channel(guild)
+    if channel is None:
+        print(f"{names} Deadlock {event} in {guild.name}: skipped, no channel to post in", flush=True)
+        return
+    if len(group) == 1:
+        member, single = group[0]
+        content = f"{member.mention} {party_message(single)}"
+    else:
+        content = group_message(event, size, [(m.mention, e.hero) for m, e in group])
+    print(f"{names} Deadlock {event} in {guild.name}: {content}", flush=True)
+    try:
+        await send_ping(channel, content, [m for m, _ in group])
+    except (discord.Forbidden, discord.HTTPException) as e:
+        print(f"Couldn't send Deadlock update in {guild.name}: {e}", flush=True)
 
 
 EDIT_RESPONSES = [
@@ -109,20 +174,10 @@ def register_events(client: discord.Client, tree: discord.app_commands.CommandTr
 
         # Deadlock Mod Manager phases (queue, match start, requeue). Tracked for everyone so the
         # state stays accurate; opt-in is only checked once there's something to post.
-        deadlock_messages = deadlock_updates(after)
-        if deadlock_messages and is_user_opted_in(str(after.id)):
-            channel = find_announce_channel(after.guild)
-            if channel is None:
-                print(f"{after} Deadlock update in {after.guild.name}: skipped, no channel to post in", flush=True)
-            for text in deadlock_messages if channel else []:
-                print(f"{after} Deadlock update in {after.guild.name}: {text}", flush=True)
-                try:
-                    await channel.send(
-                        f"{after.mention} {text}",
-                        allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=[after]),
-                    )
-                except (discord.Forbidden, discord.HTTPException) as e:
-                    print(f"Couldn't send Deadlock update in {after.guild.name}: {e}", flush=True)
+        deadlock_events = deadlock_updates(after)
+        if deadlock_events and is_user_opted_in(str(after.id)):
+            for event in deadlock_events:
+                await post_deadlock_event(after, event)
 
         started = tracked_activities(after) - tracked_activities(before)
         if not started:
@@ -154,11 +209,7 @@ def register_events(client: discord.Client, tree: discord.app_commands.CommandTr
             name, message = games[key]
             message = await playtime_message(after, name, message)
             try:
-                # Messages are user-written, so only allow pinging the player (no @everyone or roles)
-                await channel.send(
-                    f"{after.mention} {message}",
-                    allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=[after]),
-                )
+                await send_game_ping(channel, after, message)
             except (discord.Forbidden, discord.HTTPException) as e:
                 print(f"Couldn't send {name} ping in {after.guild.name}: {e}", flush=True)
 

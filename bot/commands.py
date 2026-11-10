@@ -6,7 +6,7 @@ import discord
 from discord import app_commands
 from pyke import Continent, Pyke, exceptions, DataDragon
 from bot.riot_api import get_account_info, riot_error_message, clean_riot_id_part, get_champion_mastery, get_all_ranks, rank_sort_key, get_live_game, get_match_result, get_champion_name_map, get_latest_patch, build_mastery_banner
-from bot.store import save_link, get_allowed_channels, get_link, toggle_user_opt_in, get_all_links, is_user_opted_in, save_steam_link, delete_steam_link, set_ping_channel
+from bot.store import save_link, get_allowed_channels, get_link, toggle_user_opt_in, get_all_links, is_user_opted_in, save_steam_link, delete_steam_link, set_ping_channel, toggle_ping_mentions
 from bot.steam import resolve_steam_id, get_profile, get_owned_games
 from bot.config import BASE_DIR, WORDLE_BOT_ID
 from bot.wordle import is_wordle_summary, wordle_number_for, wordle_date, build_wordle_roasts
@@ -646,6 +646,17 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
         embed = discord.Embed(title="🎮 Tracked games", description="\n".join(lines), color=discord.Color.blurple())
         embed.set_footer(text="Only opted-in players are pinged. Add more with /roast game add")
         await interaction.response.send_message(embed=embed)
+
+    # Each player chooses whether game pings @mention them. Off by default, since one game start can
+    # post in every server they share with the bot.
+    @game.command(name="mentions", description="Toggle whether game pings send you a notification")
+    async def game_mentions(interaction: discord.Interaction) -> None:
+        if toggle_ping_mentions(str(interaction.user.id)):
+            await interaction.response.send_message("Game pings will now notify you.", ephemeral=True)
+        else:
+            await interaction.response.send_message(
+                "Game pings will still @ you, but won't send you a notification.", ephemeral=True
+            )
 
     # Admin-only: picks the channel game pings go to. Leaving the channel out goes back to the default.
     @game.command(name="channel", description="(Admin) Choose the channel game pings are posted in")

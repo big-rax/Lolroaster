@@ -53,6 +53,7 @@ HELP_PAGES: dict[str, dict] = {
         "items": [
             ("/roast game add / remove / list", "Choose which games trigger pings", False),
             ("/roast game channel", "Pick where pings are posted", True),
+            ("/roast game mentions", "Choose whether pings send you a notification (off by default)", False),
             ("/steam link / unlink", "Use your Steam playtime for more accurate roasts", False),
         ],
         "footer": "Tracked by default: League, Deadlock, Neovim",
