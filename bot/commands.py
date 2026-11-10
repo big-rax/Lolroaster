@@ -17,6 +17,7 @@ from bot.activities import (
 from bot.data import FREAKY_GIFS
 from bot.settings_ui import open_settings
 from bot.help import register_help
+from bot.leaderboard import register_leaderboard
 
 
 # Registers all slash commands with the Discord command tree.
@@ -918,6 +919,7 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
             await interaction.response.send_message("You don't have a Steam account linked.", ephemeral=True)
 
     register_help(tree)
+    register_leaderboard(roast)
     tree.add_command(roast)
     tree.add_command(lol)
     tree.add_command(channel)

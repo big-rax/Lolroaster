@@ -9,6 +9,7 @@ from .settings_ui import WelcomeView, DmSetupButton, DmSkipButton
 from .store import init_db
 from .activities import load_tracked_games, known_games_loop
 from .playtime import heartbeat_loop
+from .leaderboard import leaderboard_loop, LeaderboardPageButton
 
 
 def build_client(api, ddragon) -> tuple[discord.Client, discord.app_commands.CommandTree]:
@@ -31,6 +32,7 @@ def build_client(api, ddragon) -> tuple[discord.Client, discord.app_commands.Com
     register_events(client, tree)
     client.add_view(WelcomeView())  # keeps welcome-message buttons working after restarts
     client.add_dynamic_items(DmSetupButton, DmSkipButton)  # same for the DM version
+    client.add_dynamic_items(LeaderboardPageButton)  # leaderboard arrows, on old posts too
 
     return client, tree
 
@@ -43,6 +45,7 @@ async def main() -> None:
     heartbeat_task = asyncio.create_task(heartbeat_loop())
     async with Pyke(RIOT_API_KEY) as api, DataDragon() as ddragon:
         client, _ = build_client(api, ddragon)
+        leaderboard_task = asyncio.create_task(leaderboard_loop(client))
         await client.start(TOKEN)
 
 

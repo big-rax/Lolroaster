@@ -1,5 +1,5 @@
 from __future__ import annotations
-from datetime import datetime
+from datetime import date, datetime
 import os
 import psycopg
 from . import config  # noqa: F401  (loads .env so DATABASE_URL is set)
@@ -68,6 +68,11 @@ def init_db() -> None:
     """)
     # Where game pings go (/roast game channel). NULL means the default: the first allowed channel.
     _execute("ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS ping_channel_id TEXT")
+    # Weekly leaderboard: whether it's posted, the timezone its Monday-Sunday weeks follow (NULL means the
+    # default), and the Monday of the last week it was posted for, so restarts don't post twice.
+    _execute("ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS leaderboard_enabled BOOLEAN NOT NULL DEFAULT TRUE")
+    _execute("ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS leaderboard_tz TEXT")
+    _execute("ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS leaderboard_last_week DATE")
     # Extra activities a server added with /roast game, on top of the built-in defaults.
     # message is the text after the mention; NULL means use the generic message.
     _execute("""
@@ -115,15 +120,23 @@ def set_guild_settings(guild_id: str, enabled: bool, mode: str = "specific") -> 
             mode = excluded.mode
     """, (guild_id, enabled, mode))
 
-# Returns a server's settings as {"enabled": bool, "mode": str, "ping_channel_id": str | None},
+# Returns a server's settings as {"enabled": bool, "mode": str, "ping_channel_id": str | None,
+# "leaderboard_enabled": bool, "leaderboard_tz": str | None, "leaderboard_last_week": date | None},
 # with defaults if none are saved.
 def get_guild_settings(guild_id: str) -> dict:
-    row = _execute(
-        "SELECT enabled, mode, ping_channel_id FROM guild_settings WHERE guild_id = %s", (guild_id,)
-    ).fetchone()
+    row = _execute("""
+        SELECT enabled, mode, ping_channel_id, leaderboard_enabled, leaderboard_tz, leaderboard_last_week
+        FROM guild_settings WHERE guild_id = %s
+    """, (guild_id,)).fetchone()
     if row:
-        return {"enabled": row[0], "mode": row[1], "ping_channel_id": row[2]}
-    return {"enabled": True, "mode": "specific", "ping_channel_id": None}
+        return {
+            "enabled": row[0], "mode": row[1], "ping_channel_id": row[2],
+            "leaderboard_enabled": row[3], "leaderboard_tz": row[4], "leaderboard_last_week": row[5],
+        }
+    return {
+        "enabled": True, "mode": "specific", "ping_channel_id": None,
+        "leaderboard_enabled": True, "leaderboard_tz": None, "leaderboard_last_week": None,
+    }
 
 # Sets (or with None, clears) the channel game pings are posted in. Leaves the other settings alone.
 def set_ping_channel(guild_id: str, channel_id: str | None) -> None:
@@ -209,6 +222,10 @@ def is_user_opted_in(discord_id: str) -> bool:
         "SELECT 1 FROM opted_in_users WHERE discord_id = %s", (discord_id,)
     ).fetchone()
     return row is not None
+
+# Discord ids of everyone opted in, for checking a whole server at once.
+def get_opted_in_ids() -> set[str]:
+    return {r[0] for r in _execute("SELECT discord_id FROM opted_in_users").fetchall()}
 
 # Returns every linked Riot account across all users as a list of dicts.
 def get_all_links() -> list[dict]:
@@ -300,3 +317,32 @@ def toggle_ping_mentions(discord_id: str) -> bool:
 
 def wants_ping_mentions(discord_id: str) -> bool:
     return _execute("SELECT 1 FROM ping_mention_users WHERE discord_id = %s", (discord_id,)).fetchone() is not None
+
+# Leaderboard settings, each leaving the server's other settings alone.
+def set_leaderboard_enabled(guild_id: str, enabled: bool) -> None:
+    _execute("""
+        INSERT INTO guild_settings (guild_id, leaderboard_enabled) VALUES (%s, %s)
+        ON CONFLICT (guild_id) DO UPDATE SET leaderboard_enabled = excluded.leaderboard_enabled
+    """, (guild_id, enabled))
+
+def set_leaderboard_tz(guild_id: str, tz: str | None) -> None:
+    _execute("""
+        INSERT INTO guild_settings (guild_id, leaderboard_tz) VALUES (%s, %s)
+        ON CONFLICT (guild_id) DO UPDATE SET leaderboard_tz = excluded.leaderboard_tz
+    """, (guild_id, tz))
+
+def set_leaderboard_last_week(guild_id: str, week_start: date) -> None:
+    _execute("""
+        INSERT INTO guild_settings (guild_id, leaderboard_last_week) VALUES (%s, %s)
+        ON CONFLICT (guild_id) DO UPDATE SET leaderboard_last_week = excluded.leaderboard_last_week
+    """, (guild_id, week_start))
+
+# Play sessions of these users that overlap [start, end), as (discord_id, game_name, started_at, ended_at).
+# ended_at is None for sessions still going.
+def get_sessions_between(discord_ids: list[str], start: datetime, end: datetime) -> list[tuple]:
+    if not discord_ids:
+        return []
+    return _execute("""
+        SELECT discord_id, game_name, started_at, ended_at FROM game_sessions
+        WHERE discord_id = ANY(%s) AND started_at < %s AND (ended_at IS NULL OR ended_at > %s)
+    """, (discord_ids, end, start)).fetchall()

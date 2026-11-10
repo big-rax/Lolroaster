@@ -41,6 +41,9 @@ HELP_PAGES: dict[str, dict] = {
         "intro": "The fun part.",
         "items": [
             ("/roast wordle", "Roast everyone from a Wordle group result", False),
+            ("/roast leaderboard show", "This week's playtime standings, or last week's results", False),
+            ("/roast leaderboard toggle", "Turn the Monday leaderboard post on or off", True),
+            ("/roast leaderboard timezone", "Set the timezone weeks follow (default America/Los_Angeles)", True),
             ("/roast toggle", "Opt in or out of being roasted", False),
         ],
         "footer": "Only opted-in players get roasted",
