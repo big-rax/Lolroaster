@@ -105,7 +105,7 @@ EDIT_RESPONSES = [
     "Caught you editing 😈",
     "🥸",
     "Whatcha editing 🕵️",
-    "I know what you are, Light. https://tenor.com/bLgLG.gif",
+    "you may have edited but brax likely already saw 👁️(chronically online)",
 ]
 
 
