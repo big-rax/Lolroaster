@@ -1,0 +1,7 @@
+.claude/
+neon.ts
+package.json
+package-lock.json
+skills-lock.json
+test_db.py
+run_bot.sh

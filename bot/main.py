@@ -1,4 +1,5 @@
 import asyncio
+import signal
 import discord
 from pyke import Pyke, DataDragon
 
@@ -6,7 +7,7 @@ from .commands import register_commands
 from .config import TOKEN, RIOT_API_KEY
 from .events import register_events
 from .settings_ui import WelcomeView, DmSetupButton, DmSkipButton
-from .store import init_db
+from .store import init_db, touch_open_game_sessions
 from .activities import load_tracked_games, known_games_loop
 from .playtime import heartbeat_loop
 from .leaderboard import leaderboard_loop, LeaderboardPageSelect
@@ -46,7 +47,21 @@ async def main() -> None:
     async with Pyke(RIOT_API_KEY) as api, DataDragon() as ddragon:
         client, _ = build_client(api, ddragon)
         leaderboard_task = asyncio.create_task(leaderboard_loop(client))
-        await client.start(TOKEN)
+        # Hosts like Heroku stop the bot with SIGTERM (deploys, daily restarts). Closing the client lets
+        # client.start() return normally instead of the process dying mid-heartbeat.
+        try:
+            asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(client.close()))
+        except NotImplementedError:
+            pass  # Windows can't add signal handlers to the loop; Ctrl+C still stops the bot there
+        try:
+            await client.start(TOKEN)
+        finally:
+            # Open sessions are closed at their last_seen on the next start, so mark them seen right up to now
+            try:
+                touch_open_game_sessions()
+            except Exception as e:
+                print(f"Couldn't update open game sessions on shutdown: {e!r}", flush=True)
+            print("Bot stopped", flush=True)
 
 
 if __name__ == "__main__":

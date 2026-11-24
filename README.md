@@ -83,6 +83,7 @@ In allowed channels and for opted-in users, the bot:
 ```
 run_bot.py          entry point
 run_bot.sh          start script: picks the right Python, clears stale instances, shuts down cleanly
+Procfile            tells Heroku to run the bot as a worker
 test_db.py          smoke test for the database layer
 bot/
   main.py           builds the Discord client and starts the bot
@@ -126,6 +127,36 @@ bot/
    ```
 
 Riot lookups use the NA region.
+
+## Hosting on Heroku
+
+The repo is set up to run on Heroku as a background worker (`Procfile`), with the Python version in `.python-version`. One Basic dyno ($7/month) keeps the bot online 24/7; the GitHub Student Developer Pack's Heroku credit ($13/month) covers it. Eco dynos can sleep, so use Basic.
+
+1. Install the [Heroku CLI](https://devcenter.heroku.com/articles/heroku-cli) and log in with `heroku login`.
+2. Create the app and force the Python buildpack (`package.json` would otherwise make Heroku treat it as a Node app):
+
+   ```bash
+   heroku create your-app-name
+   heroku buildpacks:set heroku/python
+   ```
+
+3. Set the same values as `.env`. Keep using your existing Postgres (e.g. Neon); don't add Heroku Postgres.
+
+   ```bash
+   heroku config:set DISCORD_TOKEN=... RIOT_API_KEY=... STEAM_API_KEY=... DATABASE_URL=...
+   ```
+
+4. Deploy, then start one Basic worker. Worker dynos don't start on their own.
+
+   ```bash
+   git push heroku main
+   heroku ps:type worker=basic
+   heroku ps:scale worker=1
+   ```
+
+5. Check it logged in with `heroku logs --tail`, then stop any copy running on your own computer so pings aren't posted twice.
+
+Later deploys are just `git push heroku main`. Heroku restarts the bot about once a day; it shuts down cleanly and picks up where it left off.
 
 ## Testing
 
