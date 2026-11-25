@@ -19,6 +19,14 @@ Everything social is opt-in: the bot only reacts to, replies to, or shows the ga
 
 Riot IDs are cleaned of invisible Unicode characters that sneak in when they're copied, and failed lookups explain what went wrong: an expired API key, an account that doesn't exist, a rate limit, or a Riot outage.
 
+### Deadlock (`/deadlock`)
+
+| Command | What it does |
+| --- | --- |
+| `/deadlock leaderboard` | Ranks the server's opted-in players by Deadlock badge, with each player's rank change and win streak from their last ranked match |
+
+It uses the Steam accounts from `/steam link`, so there's no separate account to link. Ranks come from the community [Deadlock API](https://deadlock-api.com), which needs no API key.
+
 ### Roasts and the weekly leaderboard
 
 | Command | What it does |
@@ -74,6 +82,7 @@ In allowed channels and for opted-in users, the bot:
 - **Python** with [discord.py](https://github.com/Rapptz/discord.py): slash commands, buttons, select menus and Components V2 layouts
 - **Riot Games API** through [Pyke](https://pypi.org/project/pyke-lol/), with Data Dragon for champion data and images
 - **Steam Web API** for linked accounts and playtime
+- **[Deadlock API](https://deadlock-api.com)** (community-run) for Deadlock ranks
 - **PostgreSQL** on [Neon](https://neon.com), accessed with psycopg
 - **Pillow** for the generated mastery banners
 - **asyncio** for concurrent API calls and background tasks (live-game polling, playtime tracking, the weekly leaderboard)
@@ -99,6 +108,7 @@ bot/
   playtime.py       game session and playtime tracking
   leaderboard.py    weekly playtime leaderboard and its scheduled post
   deadlock.py       Deadlock match updates from Mod Manager presence
+  deadlock_api.py   Deadlock API calls for ranks
   triggers.py       trigger-word replies
   wordle.py         Wordle bot responses
   data.py           trigger words, GIF links and canned responses

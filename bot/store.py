@@ -266,6 +266,10 @@ def get_steam_link(discord_id: str) -> str | None:
     row = _execute("SELECT steam_id FROM steam_links WHERE discord_id = %s", (discord_id,)).fetchone()
     return row[0] if row else None
 
+# Every linked Steam account as {discord_id: steam_id}, for server-wide boards like /deadlock leaderboard.
+def get_all_steam_links() -> dict[str, str]:
+    return dict(_execute("SELECT discord_id, steam_id FROM steam_links").fetchall())
+
 # Returns False if the user had no linked Steam account.
 def delete_steam_link(discord_id: str) -> bool:
     return _execute("DELETE FROM steam_links WHERE discord_id = %s", (discord_id,)).rowcount > 0

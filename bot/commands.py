@@ -6,7 +6,7 @@ import discord
 from discord import app_commands
 from pyke import Continent, Pyke, exceptions, DataDragon
 from bot.riot_api import get_account_info, riot_error_message, clean_riot_id_part, get_champion_mastery, get_all_ranks, rank_sort_key, get_live_game, get_match_result, get_champion_name_map, get_latest_patch, build_mastery_banner
-from bot.store import save_link, get_allowed_channels, get_link, toggle_user_opt_in, get_all_links, is_user_opted_in, save_steam_link, delete_steam_link, set_ping_channel, toggle_ping_mentions
+from bot.store import save_link, get_allowed_channels, get_link, toggle_user_opt_in, get_all_links, is_user_opted_in, save_steam_link, delete_steam_link, get_all_steam_links, get_opted_in_ids, set_ping_channel, toggle_ping_mentions
 from bot.steam import resolve_steam_id, get_profile, get_owned_games
 from bot.config import BASE_DIR, WORDLE_BOT_ID
 from bot.wordle import is_wordle_summary, wordle_number_for, wordle_date, build_wordle_roasts
@@ -17,6 +17,7 @@ from bot.activities import (
 from bot.data import FREAKY_GIFS
 from bot.settings_ui import open_settings
 from bot.help import register_help
+from bot import deadlock_api as dl
 from bot.leaderboard import register_leaderboard
 
 
@@ -918,9 +919,91 @@ def register_commands(tree: app_commands.CommandTree, api: Pyke, ddragon: DataDr
         else:
             await interaction.response.send_message("You don't have a Steam account linked.", ephemeral=True)
 
+    deadlock = app_commands.Group(name="deadlock", description="Deadlock ranks and stats")
+
+    # Ranks the server's opted-in players by their Deadlock badge, using the Steam accounts from /steam link.
+    # One batch request to the community Deadlock API covers everyone.
+    @deadlock.command(name="leaderboard", description="Shows the server's Deadlock ranked leaderboard")
+    async def deadlock_leaderboard(interaction: discord.Interaction) -> None:
+        if not await _require_bot_guild(interaction):
+            return
+        try:
+            await interaction.response.defer()
+        except discord.NotFound:
+            return
+
+        opted_in = get_opted_in_ids()
+        players = []  # (member, account_id)
+        for discord_id, steam_id in get_all_steam_links().items():
+            if discord_id not in opted_in:
+                continue
+            member = interaction.guild.get_member(int(discord_id))
+            if member is not None:
+                players.append((member, dl.account_id_from_steam_id(steam_id)))
+        if not players:
+            await interaction.followup.send("No one here has linked Steam yet! Use /steam link first.")
+            return
+
+        try:
+            ranks = await dl.get_ranks([account_id for _, account_id in players])
+        except Exception as e:
+            print(f"Deadlock API ERROR: {e!r}", flush=True)
+            await interaction.followup.send(dl.deadlock_error_message(e))
+            return
+
+        ranked, unranked, hidden = [], [], []
+        for member, account_id in players:
+            entry = ranks.get(account_id)
+            if entry is None:
+                hidden.append(member)  # the API leaves out accounts whose owner hid them on deadlock-api.com
+            elif entry.get("rank"):
+                ranked.append((member, entry))
+            else:
+                unranked.append(member)  # no ranked games yet, or still in placements: Obscurus
+        ranked.sort(key=lambda p: dl.rank_sort_key(p[1]), reverse=True)
+
+        lines = []
+        for i, (member, entry) in enumerate(ranked):
+            medal = ["🥇", "🥈", "🥉"][i] if i < 3 else f"`{i + 1}.`"
+            lines.append(f"{medal} **{member.display_name}** · {dl.rank_name(entry['rank'], entry['subrank'])}")
+            last = entry.get("last_match") or {}
+            details = []
+            change = last.get("player_rank_desired_progress_change")
+            if change:
+                details.append(f"{'📈' if change > 0 else '📉'} {change:+,} last game")
+            # The API gives the streak going into the last match, so a win extends it and a loss ends it
+            streak = (last.get("player_rank_initial_win_streak") or 0) + 1 if (change or 0) > 0 else 0
+            if streak >= 3:
+                details.append(f"🔥 {streak} win streak")
+            if last.get("start_time"):
+                details.append(f"played <t:{last['start_time']}:R>")
+            if details:
+                lines.append("-# " + "  ·  ".join(details))
+        if ranked and unranked:
+            lines.append("───────────────\n**Afraid of Ranked**")
+        for member in unranked:
+            lines.append(f"-# **{member.display_name}** — Obscurus")
+        if hidden:
+            if ranked or unranked:
+                lines.append("───────────────")
+            lines.append("**Hidden**")
+            for member in hidden:
+                lines.append(f"-# **{member.display_name}** — profile hidden on deadlock-api.com")
+
+        embed = discord.Embed(title="🏆 Deadlock Leaderboard", description="\n".join(lines)[:4096])
+        if ranked:
+            top = ranked[0][1]
+            embed.color = discord.Color(dl.RANK_COLORS[top["rank"]])
+            embed.set_thumbnail(url=dl.rank_image_url(top["rank"], top["subrank"]))
+        else:
+            embed.color = discord.Color.dark_grey()
+        embed.set_footer(text="Link Steam with /steam link · Ranks from deadlock-api.com")
+        await interaction.followup.send(embed=embed)
+
     register_help(tree)
     register_leaderboard(roast)
     tree.add_command(roast)
     tree.add_command(lol)
     tree.add_command(channel)
     tree.add_command(steam)
+    tree.add_command(deadlock)

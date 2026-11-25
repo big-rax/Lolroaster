@@ -34,6 +34,17 @@ HELP_PAGES: dict[str, dict] = {
         ],
         "footer": "NA accounts only for now",
     },
+    "deadlock": {
+        "label": "Deadlock (/deadlock)",
+        "emoji": "💀",
+        "title": "Deadlock (/deadlock)",
+        "intro": "Uses the Steam account you linked with /steam link, so there's nothing extra to set up.",
+        "items": [
+            ("/deadlock leaderboard", "Rank the server's opted-in players by their Deadlock badge", False),
+            ("/steam link", "Link Steam first so you show up", False),
+        ],
+        "footer": "Ranks from deadlock-api.com",
+    },
     "roast": {
         "label": "Roasts (/roast)",
         "emoji": "😈",
